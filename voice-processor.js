@@ -229,14 +229,10 @@ class VoiceProcessor {
         const isFinal = result.isFinal;
 
         if (isFinal) {
-            // ACCUMULATE final results into the sentence
-            if (this.sentence) {
-                this.sentence += " " + transcript;
-            } else {
-                this.sentence = transcript;
-            }
+            // ✅ REPLACE, don't append. Google's results are often cumulative.
+            this.sentence = transcript;
             this.lastInterim = ""; // Clear interim since we got final
-            console.log(`📝 Accumulated: "${this.sentence}"`);
+            console.log(`📝 Final Result: "${this.sentence}"`);
         } else {
             // Save interim as backup (in case stream times out)
             const preview = this.sentence ? this.sentence + " " + transcript : transcript;
@@ -308,20 +304,31 @@ class VoiceProcessor {
 
         let finalSentence = this.sentence.trim();
 
-        // ✅ TOTAL HISTORY STRIP: Check against everything processed in this stream
+        // ✅ SLIDING WINDOW OVERLAP STRIP: Find the longest overlap between history and new text
         if (this.streamHistory) {
-            const cleanOld = this.streamHistory.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
-            const cleanNew = finalSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+            const historyWords = this.streamHistory.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").split(/\s+/).filter(Boolean);
+            const currentWords = finalSentence.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").split(/\s+/).filter(Boolean);
+            const originalWords = finalSentence.split(/\s+/).filter(Boolean);
 
-            if (cleanOld && cleanNew.startsWith(cleanOld)) {
-                const oldWords = cleanOld.split(/\s+/).filter(Boolean);
-                const newWords = finalSentence.split(/\s+/).filter(Boolean);
-                
-                if (newWords.length > oldWords.length) {
-                    const stripped = newWords.slice(oldWords.length).join(" ");
-                    console.log(`✂️ Stripped total history. New part: "${stripped}"`);
+            // Find the maximum overlap (checking up to the last 20 words of history)
+            let maxOverlap = 0;
+            const checkLimit = Math.min(historyWords.length, currentWords.length, 20);
+
+            for (let i = 1; i <= checkLimit; i++) {
+                const historySuffix = historyWords.slice(-i).join(" ");
+                const currentPrefix = currentWords.slice(0, i).join(" ");
+                if (historySuffix === currentPrefix) {
+                    maxOverlap = i;
+                }
+            }
+
+            if (maxOverlap > 0) {
+                const stripped = originalWords.slice(maxOverlap).join(" ");
+                if (stripped) {
+                    console.log(`✂️ Stripped ${maxOverlap} overlapping words. New part: "${stripped}"`);
                     finalSentence = stripped;
                 } else {
+                    // It was all overlap
                     this.isFinalizing = false;
                     this.sentence = "";
                     return;
@@ -332,7 +339,7 @@ class VoiceProcessor {
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
         this.lastSentence = finalSentence;
-        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); // Accumulate
+        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); 
         this.sentence = "";
         this.lastInterim = "";
 
