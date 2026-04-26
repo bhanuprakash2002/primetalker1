@@ -180,7 +180,6 @@ class VoiceProcessor {
                         sampleRateHertz: 48000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
-                        model: "latest_long",
                         useEnhanced: true
                     },
                     interimResults: true,
@@ -195,6 +194,7 @@ class VoiceProcessor {
 
             this.isStreaming = true;
             this.streamCreatedAt = Date.now();
+            this.lastInterim = ""; // Clear any stale interim data on new stream
             console.log(`🎤 Stream started: ${langCode}`);
         } catch (e) {
             console.error("Failed to start stream:", e.message);
@@ -256,7 +256,10 @@ class VoiceProcessor {
         }
 
         this.isStreaming = false;
-        this.recognizeStream = null;
+        if (this.recognizeStream) {
+            try { this.recognizeStream.end(); } catch (e) { }
+            this.recognizeStream = null;
+        }
 
         // Use interim as backup if no finals accumulated
         if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
