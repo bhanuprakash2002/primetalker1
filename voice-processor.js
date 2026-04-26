@@ -70,7 +70,7 @@ class VoiceProcessor {
                 // ✅ Dynamic sentence timeout: faster for Indian languages
                 const baseLang = (this.myLanguage || 'en').split('-')[0];
                 if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 800; // 0.8s for Indian languages
+                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
                     console.log(`⚡ Indian language detected (${baseLang}), using fast timeout: ${this.SENTENCE_TIMEOUT}ms`);
                 }
 
@@ -80,23 +80,30 @@ class VoiceProcessor {
                         console.log(`🔥 Pre-warming STT stream for ${this.myLanguage}...`);
                         this._startStream();
                     }
-                }, 500);
+                }, 100);
 
                 // ✅ Pre-warm Translate + TTS clients (first call has extra latency)
                 setTimeout(async () => {
                     try {
                         const warmStart = Date.now();
+                        const targetLang = this.myLanguage || "en-US";
                         await Promise.all([
                             this.translateClient.translate("hello", { to: "en" }),
                             this.ttsClient.synthesizeSpeech({
                                 input: { text: "." },
                                 voice: { languageCode: "en-US" },
-                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000 }
+                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000 }
+                            }),
+                            // Also warm up the current user's language
+                            this.ttsClient.synthesizeSpeech({
+                                input: { text: "." },
+                                voice: { languageCode: targetLang.split("-")[0] === "en" ? "es-ES" : targetLang },
+                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000 }
                             })
                         ]);
                         console.log(`🔥 Translate + TTS warmed up in ${Date.now() - warmStart}ms`);
                     } catch (e) { /* ignore warm-up errors */ }
-                }, 600);
+                }, 200);
                 break;
             case "audio":
                 await this._processAudio(msg.audio);
@@ -279,6 +286,12 @@ class VoiceProcessor {
             this.sentenceTimer = null;
         }
 
+        // ✅ USE INTERIM BACKUP: If no "final" results arrived but we have interim speech
+        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+            console.log(`🔄 Using interim backup for finalization: "${this.lastInterim}"`);
+            this.sentence = this.lastInterim;
+        }
+
         if (!this.sentence || this.sentence === this.lastSentence) {
             return;
         }
@@ -288,6 +301,7 @@ class VoiceProcessor {
 
         this.lastSentence = finalSentence;
         this.sentence = "";
+        this.lastInterim = ""; // Clear interim after finalizing
 
         // Add to queue and process
         this.sentenceQueue.push(finalSentence);
@@ -345,7 +359,7 @@ class VoiceProcessor {
                     // Google TTS LINEAR16 sometimes returns a WAV header already.
                     // If it does, don't prepend another one to avoid corrupted audio starts.
                     const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
-                    const wav = isRiff ? audio : this._toWav(audio, 48000);
+                    const wav = isRiff ? audio : this._toWav(audio, 24000);
 
                     partner.ws.send(JSON.stringify({
                         event: "audio_playback",
@@ -439,7 +453,7 @@ class VoiceProcessor {
             const [response] = await this.ttsClient.synthesizeSpeech({
                 input: { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.1 }
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000, speakingRate: 1.1 }
             });
             return response.audioContent;
         } catch (e) {
