@@ -306,18 +306,27 @@ class VoiceProcessor {
 
         let finalSentence = this.sentence.trim();
 
-        // ✅ STRIP HISTORY: If Google sent us the history of the whole stream, 
-        // remove the parts we already processed in the previous sentence.
-        if (this.lastSentence && finalSentence.startsWith(this.lastSentence)) {
-            const newPart = finalSentence.substring(this.lastSentence.length).trim();
-            if (newPart) {
-                console.log(`✂️ Stripped history. New part: "${newPart}"`);
-                finalSentence = newPart;
-            } else {
-                // It was all history, nothing new
-                this.isFinalizing = false;
-                this.sentence = "";
-                return;
+        // ✅ ROBUST STRIP HISTORY: Ignore punctuation and casing when checking for overlap
+        if (this.lastSentence) {
+            const cleanOld = this.lastSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().trim();
+            const cleanNew = finalSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().trim();
+
+            if (cleanOld && cleanNew.startsWith(cleanOld)) {
+                // Find how many characters to skip in the ORIGINAL (uncleaned) new string
+                // We do a word-count based skip for better accuracy
+                const oldWords = cleanOld.split(/\s+/).filter(Boolean);
+                const newWords = finalSentence.split(/\s+/).filter(Boolean);
+                
+                if (newWords.length > oldWords.length) {
+                    const stripped = newWords.slice(oldWords.length).join(" ");
+                    console.log(`✂️ Stripped history (fuzzy). New part: "${stripped}"`);
+                    finalSentence = stripped;
+                } else if (newWords.length <= oldWords.length) {
+                    // It's all history or even less than history
+                    this.isFinalizing = false;
+                    this.sentence = "";
+                    return;
+                }
             }
         }
 
@@ -325,7 +334,7 @@ class VoiceProcessor {
 
         this.lastSentence = this.sentence.trim(); // Store the FULL history to strip next time
         this.sentence = "";
-        this.lastInterim = ""; 
+        this.lastInterim = "";
 
         // Add to queue and process
         this.sentenceQueue.push(finalSentence);
