@@ -50,6 +50,7 @@ class VoiceProcessor {
         // Processing Queue
         this.sentenceQueue = [];
         this.isProcessingQueue = false;
+        this.isFinalizing = false; // Flag to prevent double-finalization during restarts
 
         // Bind handlers
         this._handleSTTData = this._handleSTTData.bind(this);
@@ -281,6 +282,9 @@ class VoiceProcessor {
     }
 
     _finalizeSentence() {
+        if (this.isFinalizing) return;
+        this.isFinalizing = true;
+
         if (this.sentenceTimer) {
             clearTimeout(this.sentenceTimer);
             this.sentenceTimer = null;
@@ -293,6 +297,7 @@ class VoiceProcessor {
         }
 
         if (!this.sentence || this.sentence === this.lastSentence) {
+            this.isFinalizing = false;
             return;
         }
 
@@ -302,6 +307,13 @@ class VoiceProcessor {
         this.lastSentence = finalSentence;
         this.sentence = "";
         this.lastInterim = ""; // Clear interim after finalizing
+
+        // ✅ RESTART STREAM: This clears Google's internal history for the next sentence
+        this._restartStream().then(() => {
+            this.isFinalizing = false;
+        }).catch(() => {
+            this.isFinalizing = false;
+        });
 
         // Add to queue and process
         this.sentenceQueue.push(finalSentence);
