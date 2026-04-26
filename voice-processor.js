@@ -265,7 +265,7 @@ class VoiceProcessor {
             this.sentence = transcript;
             this.lastInterim = ""; 
             console.log(`📝 Final Result: "${this.sentence}"`);
-            // 🚀 Let the timer handle finalization for better stability
+            this._finalizeSentence(); // 🚀 Restore immediate finalization for certainty
         } else {
             // 🚀 Interim duplicate guard
             if (this.lastInterim === transcript) return;
@@ -352,8 +352,8 @@ class VoiceProcessor {
             this.sentenceTimer = null;
         }
 
-        // 🚀 Always use interim if available (don't wait for final)
-        if (this.lastInterim) {
+        // Use interim backup if no final result
+        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
             this.sentence = this.lastInterim;
         }
 
@@ -493,9 +493,9 @@ class VoiceProcessor {
             fil: { languageCode: "fil-PH", name: "fil-PH-Neural2-A" },
 
             // Indian Languages
-            te: { languageCode: "te-IN", name: "te-IN-Neural2-A" }, // 🚀 Faster Neural voice
+            te: { languageCode: "te-IN", name: "te-IN-Standard-A" }, 
             hi: { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
-            ta: { languageCode: "ta-IN", name: "ta-IN-Neural2-A" },
+            ta: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
             bn: { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
             gu: { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
             kn: { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
