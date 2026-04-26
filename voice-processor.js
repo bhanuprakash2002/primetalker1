@@ -44,6 +44,7 @@ class VoiceProcessor {
         this.sentence = "";           // Current accumulated sentence (from finals)
         this.lastInterim = "";        // Backup: latest interim result
         this.lastSentence = "";       // Last processed sentence
+        this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
         this.SENTENCE_TIMEOUT = 1200; // Default: 1.2s (faster)
 
@@ -195,6 +196,7 @@ class VoiceProcessor {
             this.isStreaming = true;
             this.streamCreatedAt = Date.now();
             this.lastInterim = ""; // Clear any stale interim data on new stream
+            this.streamHistory = ""; // RESET total history on new stream
             console.log(`🎤 Stream started: ${langCode}`);
         } catch (e) {
             console.error("Failed to start stream:", e.message);
@@ -306,23 +308,20 @@ class VoiceProcessor {
 
         let finalSentence = this.sentence.trim();
 
-        // ✅ ROBUST STRIP HISTORY: Ignore punctuation and casing when checking for overlap
-        if (this.lastSentence) {
-            const cleanOld = this.lastSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().trim();
-            const cleanNew = finalSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().trim();
+        // ✅ TOTAL HISTORY STRIP: Check against everything processed in this stream
+        if (this.streamHistory) {
+            const cleanOld = this.streamHistory.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+            const cleanNew = finalSentence.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 
             if (cleanOld && cleanNew.startsWith(cleanOld)) {
-                // Find how many characters to skip in the ORIGINAL (uncleaned) new string
-                // We do a word-count based skip for better accuracy
                 const oldWords = cleanOld.split(/\s+/).filter(Boolean);
                 const newWords = finalSentence.split(/\s+/).filter(Boolean);
                 
                 if (newWords.length > oldWords.length) {
                     const stripped = newWords.slice(oldWords.length).join(" ");
-                    console.log(`✂️ Stripped history (fuzzy). New part: "${stripped}"`);
+                    console.log(`✂️ Stripped total history. New part: "${stripped}"`);
                     finalSentence = stripped;
-                } else if (newWords.length <= oldWords.length) {
-                    // It's all history or even less than history
+                } else {
                     this.isFinalizing = false;
                     this.sentence = "";
                     return;
@@ -332,7 +331,8 @@ class VoiceProcessor {
 
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
-        this.lastSentence = this.sentence.trim(); // Store the FULL history to strip next time
+        this.lastSentence = finalSentence;
+        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); // Accumulate
         this.sentence = "";
         this.lastInterim = "";
 
