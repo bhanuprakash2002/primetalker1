@@ -335,43 +335,10 @@ class VoiceProcessor {
             return;
         }
 
-        let finalSentence = this.sentence.trim();
-
-        // ✅ SLIDING WINDOW OVERLAP STRIP: Find the longest overlap between history and new text
-        if (this.streamHistory) {
-            const clean = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
-            const historyWords = clean(this.streamHistory).split(" ").filter(Boolean);
-            const currentWords = clean(finalSentence).split(" ").filter(Boolean);
-            const originalWords = finalSentence.split(/\s+/).filter(Boolean);
-
-            let maxOverlap = 0;
-            const checkLimit = Math.min(historyWords.length, currentWords.length);
-
-            for (let i = 1; i <= checkLimit; i++) {
-                const historySuffix = historyWords.slice(-i).join(" ");
-                const currentPrefix = currentWords.slice(0, i).join(" ");
-                if (historySuffix === currentPrefix) {
-                    maxOverlap = i;
-                }
-            }
-
-            if (maxOverlap > 0) {
-                const stripped = originalWords.slice(maxOverlap).join(" ");
-                if (stripped) {
-                    console.log(`✂️ Stripped ${maxOverlap} words from total history. New part: "${stripped}"`);
-                    finalSentence = stripped;
-                } else {
-                    this.isFinalizing = false;
-                    this.sentence = "";
-                    return;
-                }
-            }
-        }
-
+        const finalSentence = this.sentence.trim();
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
         this.lastSentence = finalSentence;
-        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); 
         this.sentence = "";
         this.lastInterim = "";
 
@@ -379,7 +346,12 @@ class VoiceProcessor {
         this.sentenceQueue.push(finalSentence);
         this._processQueue();
 
-        this.isFinalizing = false;
+        // ✅ RESTART IMMEDIATELY: Clear Google's memory for the next sentence
+        this._restartStream().then(() => {
+            this.isFinalizing = false;
+        }).catch(() => {
+            this.isFinalizing = false;
+        });
     }
 
     async _processQueue() {
