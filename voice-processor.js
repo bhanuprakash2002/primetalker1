@@ -246,7 +246,6 @@ class VoiceProcessor {
         await this._stopStream();
         this.sentence = "";      
         this.lastInterim = "";   
-        this.lastSentence = "";  // 🚀 Clear history on restart
         await this._startStream();
         
         this.isRestarting = false;
@@ -320,9 +319,9 @@ class VoiceProcessor {
         let timeout = this.SENTENCE_TIMEOUT;
         const langCode = this._getLangCode(this.myLanguage);
         
-        // 🚀 Hyper-aggressive timeouts
+        // 🚀 Aggressive but sane timeouts
         if (langCode.startsWith("en-")) {
-            timeout = 250; // 0.25s
+            timeout = 500; // 0.5s
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
@@ -371,6 +370,7 @@ class VoiceProcessor {
         this.lastSentence = finalSentence;
         this.sentence = "";
         this.lastInterim = "";
+        this.audioBuffer = []; // 🚀 FLUSH BUFFER so finished speech isn't re-processed
 
         // 🚀 Smart Queue Deduplication
         const exists = this.sentenceQueue.some(s => clean(s) === clean(finalSentence));
