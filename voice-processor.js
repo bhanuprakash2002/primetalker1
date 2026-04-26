@@ -46,7 +46,7 @@ class VoiceProcessor {
         this.lastSentence = "";       // Last processed sentence
         this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 1000; // Default: 1.0s (faster)
+        this.SENTENCE_TIMEOUT = 600;  // 🚀 Base timeout reduced
 
         // Processing Queue
         this.sentenceQueue = [];
@@ -194,7 +194,8 @@ class VoiceProcessor {
                         sampleRateHertz: 48000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
-                        useEnhanced: true
+                        useEnhanced: true,
+                        model: "latest_short"   // 🚀 High-speed model
                     },
                     interimResults: true,
                     singleUtterance: false
@@ -240,8 +241,9 @@ class VoiceProcessor {
         this.isRestarting = true;
         
         await this._stopStream();
-        this.sentence = "";      // CLEAR buffer
-        this.lastInterim = "";   // CLEAR backup
+        this.sentence = "";      
+        this.lastInterim = "";   
+        this.lastSentence = "";  // 🚀 Clear history on restart
         await this._startStream();
         
         this.isRestarting = false;
@@ -260,12 +262,21 @@ class VoiceProcessor {
             this.sentence = transcript;
             this.lastInterim = ""; 
             console.log(`📝 Final Result: "${this.sentence}"`);
+            this._finalizeSentence();
         } else {
+            // 🚀 Interim duplicate guard
+            if (this.lastInterim === transcript) return;
+
             // Save interim as backup (in case stream times out)
             const preview = this.sentence ? this.sentence + " " + transcript : transcript;
             this.lastInterim = preview; 
             console.log(`⏳ Speaking: "${preview}"`);
             this._sendToUI({ event: "transcript_interim", text: preview });
+
+            // 🚀 Trigger early finalize when user pauses (ends in . or ?)
+            if (transcript.endsWith(".") || transcript.endsWith("?")) {
+                this._finalizeSentence();
+            }
         }
 
         // Reset timer - user is still speaking
@@ -306,13 +317,13 @@ class VoiceProcessor {
         let timeout = this.SENTENCE_TIMEOUT;
         const langCode = this._getLangCode(this.myLanguage);
         
-        // English is very stable, can be hyper-aggressive
+        // 🚀 Hyper-aggressive timeouts
         if (langCode.startsWith("en-")) {
-            timeout = 400; // 0.4s (Near instant)
+            timeout = 250; // 0.25s
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 900; // 0.9s for Indian languages
+                timeout = 500; // 0.5s for Indian languages
             }
         }
 
@@ -324,9 +335,9 @@ class VoiceProcessor {
     _finalizeSentence() {
         if (this.isFinalizing) return;
 
-        // 🛑 ECHO GUARD: Prevent double-finalizing the same thought within 300ms
+        // 🛑 STRONG ECHO GUARD: 700ms
         const now = Date.now();
-        if (now - this.lastFinalizeTime < 300) {
+        if (now - this.lastFinalizeTime < 700) {
             return;
         }
 
@@ -338,12 +349,15 @@ class VoiceProcessor {
             this.sentenceTimer = null;
         }
 
-        // Use interim backup if no final result
-        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+        // 🚀 Always use interim if available (don't wait for final)
+        if (this.lastInterim) {
             this.sentence = this.lastInterim;
         }
 
-        if (!this.sentence || this.sentence === this.lastSentence) {
+        // 🚀 Strong duplicate filter (Normalize before compare)
+        const clean = (text) => text.toLowerCase().replace(/[^\w\s\u0C00-\u0C7F\u0900-\u097F]/g, "").trim();
+
+        if (!this.sentence || clean(this.sentence) === clean(this.lastSentence)) {
             this.isFinalizing = false;
             return;
         }
@@ -355,8 +369,11 @@ class VoiceProcessor {
         this.sentence = "";
         this.lastInterim = "";
 
-        // Send for processing
-        this.sentenceQueue.push(finalSentence);
+        // 🚀 Stop duplicate queue entries
+        if (!this.sentenceQueue.includes(finalSentence)) {
+            this.sentenceQueue.push(finalSentence);
+        }
+        
         this._processQueue();
 
         // ✅ RESTART IMMEDIATELY: Clear Google's memory for the next sentence
@@ -472,9 +489,9 @@ class VoiceProcessor {
             fil: { languageCode: "fil-PH", name: "fil-PH-Neural2-A" },
 
             // Indian Languages
+            te: { languageCode: "te-IN", name: "te-IN-Neural2-A" }, // 🚀 Faster Neural voice
             hi: { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
-            te: { languageCode: "te-IN", name: "te-IN-Standard-A" },
-            ta: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
+            ta: { languageCode: "ta-IN", name: "ta-IN-Neural2-A" },
             bn: { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
             gu: { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
             kn: { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
