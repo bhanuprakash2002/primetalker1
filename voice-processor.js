@@ -213,9 +213,9 @@ class VoiceProcessor {
     }
 
     async _restartStream() {
-        const savedSentence = this.sentence;
         await this._stopStream();
-        this.sentence = savedSentence;
+        this.sentence = "";      // CLEAR buffer
+        this.lastInterim = "";   // CLEAR backup
         await this._startStream();
     }
 
