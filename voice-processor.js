@@ -52,6 +52,8 @@ class VoiceProcessor {
         this.sentenceQueue = [];
         this.isProcessingQueue = false;
         this.isFinalizing = false; // Flag to prevent double-finalization during restarts
+        this.isRestarting = false; // Flag for atomic restarts
+        this.audioBuffer = [];    // Buffer for audio during restarts
 
         // Bind handlers
         this._handleSTTData = this._handleSTTData.bind(this);
@@ -143,6 +145,12 @@ class VoiceProcessor {
 
         const buffer = Buffer.from(base64Audio, "base64");
 
+        // If we are in the middle of a restart, buffer the audio so it's not lost
+        if (this.isRestarting) {
+            this.audioBuffer.push(buffer);
+            return;
+        }
+
         // Ensure stream is running
         if (!this.isStreaming) {
             await this._startStream();
@@ -153,6 +161,9 @@ class VoiceProcessor {
         if (streamAge > 50000) { // Restart every 50s for safety
             console.log("🔄 Restarting stream (age limit)");
             await this._restartStream();
+            // Buffer this chunk since we just triggered a restart
+            this.audioBuffer.push(buffer);
+            return;
         }
 
         // Send ALL audio to Google (let it decide what's speech)
@@ -162,10 +173,9 @@ class VoiceProcessor {
             } catch (e) {
                 console.error("Write error:", e.message);
                 await this._restartStream();
+                this.audioBuffer.push(buffer); // Save for replay
             }
         }
-
-        // DON'T reset timer here - only reset when we get actual STT results
     }
 
     async _startStream() {
@@ -195,9 +205,17 @@ class VoiceProcessor {
 
             this.isStreaming = true;
             this.streamCreatedAt = Date.now();
-            this.lastInterim = ""; // Clear any stale interim data on new stream
-            this.streamHistory = ""; // RESET total history on new stream
+            this.lastInterim = ""; 
             console.log(`🎤 Stream started: ${langCode}`);
+
+            // ✅ REPLAY BUFFER: Send any audio that was caught during the restart
+            if (this.audioBuffer.length > 0) {
+                console.log(`📡 Replaying ${this.audioBuffer.length} buffered chunks`);
+                this.audioBuffer.forEach(chunk => {
+                    if (this.recognizeStream) this.recognizeStream.write(chunk);
+                });
+                this.audioBuffer = [];
+            }
         } catch (e) {
             console.error("Failed to start stream:", e.message);
             this.isStreaming = false;
@@ -213,10 +231,15 @@ class VoiceProcessor {
     }
 
     async _restartStream() {
+        if (this.isRestarting) return;
+        this.isRestarting = true;
+        
         await this._stopStream();
         this.sentence = "";      // CLEAR buffer
         this.lastInterim = "";   // CLEAR backup
         await this._startStream();
+        
+        this.isRestarting = false;
     }
 
     _handleSTTData(response) {
