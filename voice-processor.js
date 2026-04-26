@@ -372,9 +372,6 @@ class VoiceProcessor {
         this.sentence = "";
         this.lastInterim = "";
 
-        // 🚀 Smart duplicate filter (Normalize before compare)
-        const clean = (text) => text.toLowerCase().replace(/[^\w\s\u0C00-\u0C7F\u0900-\u097F]/g, "").trim();
-        
         // 🚀 Smart Queue Deduplication
         const exists = this.sentenceQueue.some(s => clean(s) === clean(finalSentence));
         if (!exists) {
