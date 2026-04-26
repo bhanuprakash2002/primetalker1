@@ -53,7 +53,9 @@ class VoiceProcessor {
         this.isProcessingQueue = false;
         this.isFinalizing = false; // Flag to prevent double-finalization during restarts
         this.isRestarting = false; // Flag for atomic restarts
+        this.isStartingStream = false; // Flag to prevent multiple parallel starts
         this.audioBuffer = [];    // Buffer for audio during restarts
+        this.lastFinalizeTime = 0; // Timestamp of last finalization to prevent echoes
 
         // Bind handlers
         this._handleSTTData = this._handleSTTData.bind(this);
@@ -151,9 +153,9 @@ class VoiceProcessor {
             return;
         }
 
-        // Ensure stream is running
-        if (!this.isStreaming) {
-            await this._startStream();
+        // Ensure stream is running (with lock)
+        if (!this.isStreaming && !this.isStartingStream) {
+            this._startStream();
         }
 
         // Check if we need to restart (Google has ~60s limit)
@@ -179,7 +181,8 @@ class VoiceProcessor {
     }
 
     async _startStream() {
-        if (this.isStreaming) return;
+        if (this.isStreaming || this.isStartingStream) return;
+        this.isStartingStream = true;
 
         const langCode = this._getLangCode(this.myLanguage);
 
@@ -204,6 +207,7 @@ class VoiceProcessor {
                 });
 
             this.isStreaming = true;
+            this.isStartingStream = false;
             this.streamCreatedAt = Date.now();
             this.lastInterim = ""; 
             console.log(`🎤 Stream started: ${langCode}`);
@@ -219,6 +223,7 @@ class VoiceProcessor {
         } catch (e) {
             console.error("Failed to start stream:", e.message);
             this.isStreaming = false;
+            this.isStartingStream = false;
         }
     }
 
@@ -318,7 +323,15 @@ class VoiceProcessor {
 
     _finalizeSentence() {
         if (this.isFinalizing) return;
+
+        // 🛑 ECHO GUARD: Prevent double-finalizing the same thought within 300ms
+        const now = Date.now();
+        if (now - this.lastFinalizeTime < 300) {
+            return;
+        }
+
         this.isFinalizing = true;
+        this.lastFinalizeTime = now;
 
         if (this.sentenceTimer) {
             clearTimeout(this.sentenceTimer);
