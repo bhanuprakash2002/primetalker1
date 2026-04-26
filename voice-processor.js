@@ -285,6 +285,13 @@ class VoiceProcessor {
             }
         }
 
+        // 🚀 SMART FINALIZE: If Google adds a period or question mark, finalize INSTANTLY
+        if (transcript.endsWith(".") || transcript.endsWith("?")) {
+            console.log("🎯 Punctuation detected, finalizing early...");
+            this._finalizeSentence();
+            return;
+        }
+
         // Reset timer - user is still speaking
         this._resetSentenceTimer();
     }
