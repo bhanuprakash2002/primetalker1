@@ -76,7 +76,7 @@ class VoiceProcessor {
                 // ✅ Dynamic sentence timeout: faster for Indian languages
                 const baseLang = (this.myLanguage || 'en').split('-')[0];
                 if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
+                    this.SENTENCE_TIMEOUT = 600; // 0.6s for Indian languages
                     console.log(`⚡ Indian language detected (${baseLang}), using fast timeout: ${this.SENTENCE_TIMEOUT}ms`);
                 }
 
@@ -150,6 +150,7 @@ class VoiceProcessor {
         // If we are in the middle of a restart, buffer the audio so it's not lost
         if (this.isRestarting) {
             this.audioBuffer.push(buffer);
+            if (this.audioBuffer.length > 50) this.audioBuffer.shift(); // Safety cap
             return;
         }
 
@@ -165,6 +166,7 @@ class VoiceProcessor {
             await this._restartStream();
             // Buffer this chunk since we just triggered a restart
             this.audioBuffer.push(buffer);
+            if (this.audioBuffer.length > 50) this.audioBuffer.shift();
             return;
         }
 
@@ -176,6 +178,7 @@ class VoiceProcessor {
                 console.error("Write error:", e.message);
                 await this._restartStream();
                 this.audioBuffer.push(buffer); // Save for replay
+                if (this.audioBuffer.length > 50) this.audioBuffer.shift();
             }
         }
     }
@@ -262,7 +265,7 @@ class VoiceProcessor {
             this.sentence = transcript;
             this.lastInterim = ""; 
             console.log(`📝 Final Result: "${this.sentence}"`);
-            this._finalizeSentence();
+            // 🚀 Let the timer handle finalization for better stability
         } else {
             // 🚀 Interim duplicate guard
             if (this.lastInterim === transcript) return;
@@ -369,8 +372,12 @@ class VoiceProcessor {
         this.sentence = "";
         this.lastInterim = "";
 
-        // 🚀 Stop duplicate queue entries
-        if (!this.sentenceQueue.includes(finalSentence)) {
+        // 🚀 Smart duplicate filter (Normalize before compare)
+        const clean = (text) => text.toLowerCase().replace(/[^\w\s\u0C00-\u0C7F\u0900-\u097F]/g, "").trim();
+        
+        // 🚀 Smart Queue Deduplication
+        const exists = this.sentenceQueue.some(s => clean(s) === clean(finalSentence));
+        if (!exists) {
             this.sentenceQueue.push(finalSentence);
         }
         
