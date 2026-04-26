@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Translation - Start a Call</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">🌐</div>
+            <h1>Live Translation</h1>
+            <p>Speak in any language, hear in yours</p>
+        </header>
+
+        <div class="card">
+            <h2>Start a New Call</h2>
+
+            <div class="form-group">
+                <label for="userName">Your Name</label>
+                <input type="text" id="userName" placeholder="Enter your name" autocomplete="name">
+            </div>
+
+            <div class="form-group">
+                <label for="userLanguage">Your Language</label>
+                <select id="userLanguage">
+                    <option value="en">English</option>
+                    <option value="es">Spanish (Español)</option>
+                    <option value="fr">French (Français)</option>
+                    <option value="de">German (Deutsch)</option>
+                    <option value="hi">Hindi (हिन्दी)</option>
+                    <option value="te">Telugu (తెలుగు)</option>
+                    <option value="ta">Tamil (தமிழ்)</option>
+                    <option value="pt">Portuguese (Português)</option>
+                    <option value="ru">Russian (Русский)</option>
+                    <option value="zh">Chinese (中文)</option>
+                    <option value="ja">Japanese (日本語)</option>
+                    <option value="ko">Korean (한국어)</option>
+                    <option value="ar">Arabic (العربية)</option>
+                </select>
+            </div>
+
+            <button class="btn btn-primary" id="createRoomBtn">
+                Create Room
+            </button>
+        </div>
+
+        <div class="card hidden" id="shareCard">
+            <h2>✅ Room Created!</h2>
+            <p style="color: var(--text-muted); margin-bottom: 16px;">
+                Share this link with your partner:
+            </p>
+
+            <div class="share-box">
+                <input type="text" id="shareLink" readonly>
+                <button id="copyBtn">Copy</button>
+            </div>
+
+            <button class="btn btn-primary" id="joinCallBtn" style="margin-top: 20px;">
+                Join Call
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const createRoomBtn = document.getElementById('createRoomBtn');
+        const shareCard = document.getElementById('shareCard');
+        const shareLink = document.getElementById('shareLink');
+        const copyBtn = document.getElementById('copyBtn');
+        const joinCallBtn = document.getElementById('joinCallBtn');
+
+        let roomId = null;
+
+        createRoomBtn.addEventListener('click', async () => {
+            const name = document.getElementById('userName').value.trim() || 'User';
+            const language = document.getElementById('userLanguage').value;
+
+            createRoomBtn.disabled = true;
+            createRoomBtn.innerHTML = '<span class="loading"></span> Creating...';
+
+            try {
+                const response = await fetch('/create-room', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        creatorLanguage: language,
+                        creatorName: name
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.roomId) {
+                    roomId = data.roomId;
+                    shareLink.value = data.joinUrl;
+                    shareCard.classList.remove('hidden');
+
+                    // Store session info
+                    sessionStorage.setItem('roomId', roomId);
+                    sessionStorage.setItem('userType', 'caller');
+                    sessionStorage.setItem('myLanguage', language);
+                    sessionStorage.setItem('myName', name);
+                } else {
+                    alert('Failed to create room: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error creating room: ' + error.message);
+            } finally {
+                createRoomBtn.disabled = false;
+                createRoomBtn.textContent = 'Create Room';
+            }
+        });
+
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(shareLink.value);
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+            } catch (e) {
+                shareLink.select();
+                document.execCommand('copy');
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+            }
+        });
+
+        joinCallBtn.addEventListener('click', () => {
+            window.location.href = `/call.html?room=${roomId}`;
+        });
+    </script>
+</body>
+
+</html>

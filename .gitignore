@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables (keep secret!)
+.env
+
+# Google credentials (will set as env var on Render)
+google-credentials.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

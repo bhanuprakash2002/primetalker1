@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join Call - Live Translation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">🌐</div>
+            <h1>Join Translation Call</h1>
+            <p>Select your language to get started</p>
+        </header>
+
+        <div class="card" id="joinCard">
+            <h2>Join Room</h2>
+
+            <div class="form-group">
+                <label for="roomId">Room ID</label>
+                <input type="text" id="roomId" placeholder="Enter room ID" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="userName">Your Name</label>
+                <input type="text" id="userName" placeholder="Enter your name" autocomplete="name">
+            </div>
+
+            <div class="form-group">
+                <label for="userLanguage">Your Language</label>
+                <select id="userLanguage">
+                    <option value="en">English</option>
+                    <option value="es">Spanish (Español)</option>
+                    <option value="fr">French (Français)</option>
+                    <option value="de">German (Deutsch)</option>
+                    <option value="hi">Hindi (हिन्दी)</option>
+                    <option value="te">Telugu (తెలుగు)</option>
+                    <option value="ta">Tamil (தமிழ்)</option>
+                    <option value="pt">Portuguese (Português)</option>
+                    <option value="ru">Russian (Русский)</option>
+                    <option value="zh">Chinese (中文)</option>
+                    <option value="ja">Japanese (日本語)</option>
+                    <option value="ko">Korean (한국어)</option>
+                    <option value="ar">Arabic (العربية)</option>
+                </select>
+            </div>
+
+            <button class="btn btn-primary" id="joinBtn">
+                Join Call
+            </button>
+        </div>
+
+        <div class="card hidden" id="errorCard">
+            <h2>❌ Error</h2>
+            <p id="errorMessage" style="color: var(--danger);"></p>
+            <button class="btn btn-secondary" onclick="window.location.href='/'">
+                Go Home
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomId = urlParams.get('room');
+
+        document.getElementById('roomId').value = roomId || '';
+
+        if (!roomId) {
+            document.getElementById('joinCard').classList.add('hidden');
+            document.getElementById('errorCard').classList.remove('hidden');
+            document.getElementById('errorMessage').textContent = 'No room ID provided. Please use the link shared by the room creator.';
+        }
+
+        document.getElementById('joinBtn').addEventListener('click', async () => {
+            const name = document.getElementById('userName').value.trim() || 'User';
+            const language = document.getElementById('userLanguage').value;
+            const btn = document.getElementById('joinBtn');
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Joining...';
+
+            try {
+                const response = await fetch('/join-room', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        roomId: roomId,
+                        participantLanguage: language,
+                        participantName: name
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // Store session info
+                    sessionStorage.setItem('roomId', roomId);
+                    sessionStorage.setItem('userType', 'receiver');
+                    sessionStorage.setItem('myLanguage', language);
+                    sessionStorage.setItem('myName', name);
+
+                    // Go to call page
+                    window.location.href = `/call.html?room=${roomId}`;
+                } else {
+                    throw new Error(data.error || 'Failed to join room');
+                }
+            } catch (error) {
+                document.getElementById('joinCard').classList.add('hidden');
+                document.getElementById('errorCard').classList.remove('hidden');
+                document.getElementById('errorMessage').textContent = error.message;
+            }
+        });
+    </script>
+</body>
+
+</html>

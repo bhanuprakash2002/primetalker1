@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Translation Call</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Waiting Screen -->
+    <div class="container" id="waitingScreen">
+        <div class="waiting-screen">
+            <div class="waiting-animation">📞</div>
+            <h2>Waiting for partner...</h2>
+            <p>Share the room link with your partner to start the call</p>
+            <div id="roomInfo" style="margin-top: 20px; color: var(--text-muted);"></div>
+        </div>
+    </div>
+
+    <!-- Call Screen -->
+    <div class="call-screen" id="callScreen">
+        <div class="call-header">
+            <div class="call-status" id="callStatus">
+                <span class="status-dot"></span>
+                <span>Connected</span>
+            </div>
+            <div class="partner-info" id="partnerInfo">
+                Partner: <span id="partnerName">--</span> (<span id="partnerLang">--</span>)
+            </div>
+        </div>
+
+        <div class="connection-status connecting" id="connectionStatus">
+            Connecting to server...
+        </div>
+
+        <div class="transcript-area" id="transcriptArea">
+            <div style="text-align: center; color: var(--text-muted); padding: 40px;">
+                <p>🎤 Speak to start the conversation</p>
+                <p style="font-size: 0.9rem; margin-top: 10px;">
+                    Your speech will be translated in real-time
+                </p>
+            </div>
+        </div>
+
+        <div class="speaking-indicator" id="speakingIndicator">
+            <span class="mic-icon">🎤</span>
+            <span class="speaking-text" id="speakingText">Tap and speak...</span>
+        </div>
+
+        <div class="call-controls">
+            <button class="control-btn mute" id="muteBtn" title="Mute">🔇</button>
+            <button class="control-btn end-call" id="endCallBtn" title="End Call">📵</button>
+        </div>
+    </div>
+
+    <script>
+        // Get session info
+        const roomId = sessionStorage.getItem('roomId') || new URLSearchParams(window.location.search).get('room');
+        const userType = sessionStorage.getItem('userType') || 'caller';
+        const myLanguage = sessionStorage.getItem('myLanguage') || 'en';
+        const myName = sessionStorage.getItem('myName') || 'User';
+
+        // Elements
+        const waitingScreen = document.getElementById('waitingScreen');
+        const callScreen = document.getElementById('callScreen');
+        const transcriptArea = document.getElementById('transcriptArea');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const speakingIndicator = document.getElementById('speakingIndicator');
+        const speakingText = document.getElementById('speakingText');
+        const partnerName = document.getElementById('partnerName');
+        const partnerLang = document.getElementById('partnerLang');
+        const muteBtn = document.getElementById('muteBtn');
+        const endCallBtn = document.getElementById('endCallBtn');
+
+        // State
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let isMuted = false;
+        let partnerConnected = false;
+        let hasTranscripts = false;
+
+        // Language names
+        const languageNames = {
+            en: 'English', es: 'Spanish', fr: 'French', de: 'German',
+            hi: 'Hindi', te: 'Telugu', ta: 'Tamil', pt: 'Portuguese',
+            ru: 'Russian', zh: 'Chinese', ja: 'Japanese', ko: 'Korean', ar: 'Arabic'
+        };
+
+        // Initialize
+        async function init() {
+            if (!roomId) {
+                alert('No room ID found');
+                window.location.href = '/';
+                return;
+            }
+
+            document.getElementById('roomInfo').textContent = `Room: ${roomId}`;
+
+            // Check room status
+            try {
+                const response = await fetch(`/room-info?roomId=${roomId}`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Check if partner is already in
+                    if (userType === 'caller' && data.participantLanguage) {
+                        partnerConnected = true;
+                        partnerName.textContent = data.participantName || 'Partner';
+                        partnerLang.textContent = languageNames[data.participantLanguage] || data.participantLanguage;
+                    } else if (userType === 'receiver' && data.creatorLanguage) {
+                        partnerConnected = true;
+                        partnerName.textContent = data.creatorName || 'Partner';
+                        partnerLang.textContent = languageNames[data.creatorLanguage] || data.creatorLanguage;
+                    }
+
+                    if (partnerConnected) {
+                        showCallScreen();
+                    }
+                }
+            } catch (e) {
+                console.error('Error checking room:', e);
+            }
+
+            // Connect WebSocket
+            connectWebSocket();
+        }
+
+        function connectWebSocket() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${wsProtocol}//${window.location.host}/audio-stream`);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateConnectionStatus('connected', 'Connected');
+
+                // Send connection info
+                ws.send(JSON.stringify({
+                    event: 'connected',
+                    roomId: roomId,
+                    userType: userType,
+                    myLanguage: myLanguage,
+                    myName: myName
+                }));
+
+                // Start audio capture
+                startAudioCapture();
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleServerMessage(data);
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+                updateConnectionStatus('error', 'Disconnected');
+
+                // Attempt reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!ws || ws.readyState === WebSocket.CLOSED) {
+                        connectWebSocket();
+                    }
+                }, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+                updateConnectionStatus('error', 'Connection error');
+            };
+        }
+
+        function handleServerMessage(data) {
+            switch (data.event) {
+                case 'user_joined':
+                    partnerConnected = true;
+                    partnerName.textContent = data.name || 'Partner';
+                    partnerLang.textContent = languageNames[data.language] || data.language;
+                    showCallScreen();
+                    addSystemMessage(`${data.name} joined the call`);
+                    break;
+
+                case 'user_left':
+                    addSystemMessage('Partner left the call');
+                    partnerConnected = false;
+                    break;
+
+                case 'transcript_interim':
+                    if (data.userType === userType) {
+                        updateInterimTranscript(data.text);
+                    }
+                    break;
+
+                case 'translation':
+                    addTranslation(data);
+                    break;
+
+                case 'audio_playback':
+                    playAudio(data.audio);
+                    break;
+            }
+        }
+
+        function showCallScreen() {
+            waitingScreen.classList.add('hidden');
+            callScreen.classList.add('active');
+        }
+
+        function updateConnectionStatus(type, text) {
+            connectionStatus.className = `connection-status ${type}`;
+            connectionStatus.textContent = text;
+
+            if (type === 'connected') {
+                setTimeout(() => {
+                    connectionStatus.style.display = 'none';
+                }, 2000);
+            } else {
+                connectionStatus.style.display = 'block';
+            }
+        }
+
+        // Audio buffering for slow networks
+        let audioChunks = [];
+        let sendInterval = null;
+
+        async function startAudioCapture() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        sampleRate: 48000,
+                        channelCount: 1
+                    }
+                });
+
+                audioContext = new AudioContext({ sampleRate: 48000 });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+
+                // Larger buffer for fewer callbacks
+                processor = audioContext.createScriptProcessor(8192, 1, 1);
+
+                processor.onaudioprocess = (e) => {
+                    if (isMuted) return;
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    // Convert Float32 to Int16 and store
+                    const int16Data = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+
+                    // Add to buffer
+                    audioChunks.push(int16Data);
+
+                    // Update speaking indicator
+                    const energy = calculateEnergy(inputData);
+                    updateSpeakingIndicator(energy > 0.01);
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Send buffered audio every 200ms (5 times per second)
+                sendInterval = setInterval(() => {
+                    if (!ws || ws.readyState !== WebSocket.OPEN || audioChunks.length === 0) return;
+
+                    // Combine all chunks into one
+                    const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                    const combined = new Int16Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of audioChunks) {
+                        combined.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    audioChunks = [];
+
+                    // Send to server
+                    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(combined.buffer)));
+                    ws.send(JSON.stringify({
+                        event: 'audio',
+                        audio: base64Audio
+                    }));
+                }, 200);
+
+                speakingText.textContent = 'Listening...';
+                console.log('Audio capture started (buffered for network)');
+            } catch (err) {
+                console.error('Error starting audio:', err);
+                alert('Could not access microphone. Please allow microphone access.');
+            }
+        }
+
+        function calculateEnergy(data) {
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) {
+                sum += Math.abs(data[i]);
+            }
+            return sum / data.length;
+        }
+
+        function updateSpeakingIndicator(isSpeaking) {
+            if (isSpeaking) {
+                speakingIndicator.classList.add('active');
+                speakingText.textContent = 'Speaking...';
+            } else {
+                speakingIndicator.classList.remove('active');
+                speakingText.textContent = 'Listening...';
+            }
+        }
+
+        let interimElement = null;
+
+        function updateInterimTranscript(text) {
+            if (!hasTranscripts) {
+                transcriptArea.innerHTML = '';
+                hasTranscripts = true;
+            }
+
+            if (!interimElement) {
+                interimElement = document.createElement('div');
+                interimElement.className = 'transcript-item sent interim';
+                transcriptArea.appendChild(interimElement);
+            }
+
+            interimElement.innerHTML = `<div class="transcript-translated">${text}</div>`;
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+        }
+
+        function addTranslation(data) {
+            if (!hasTranscripts) {
+                transcriptArea.innerHTML = '';
+                hasTranscripts = true;
+            }
+
+            // Remove interim if exists
+            if (interimElement) {
+                interimElement.remove();
+                interimElement = null;
+            }
+
+            const isMine = data.fromUser === userType;
+            const div = document.createElement('div');
+            div.className = `transcript-item ${isMine ? 'sent' : 'received'}`;
+
+            div.innerHTML = `
+                <div class="transcript-original">${data.originalText}</div>
+                <div class="transcript-translated">${data.translatedText}</div>
+            `;
+
+            transcriptArea.appendChild(div);
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+        }
+
+        function addSystemMessage(text) {
+            const div = document.createElement('div');
+            div.style.cssText = 'text-align: center; color: var(--text-muted); padding: 10px; font-size: 0.9rem;';
+            div.textContent = text;
+            transcriptArea.appendChild(div);
+            transcriptArea.scrollTop = transcriptArea.scrollHeight;
+        }
+
+        // Audio playback with queue (prevents overlap and handles autoplay)
+        let audioQueue = [];
+        let isPlayingAudio = false;
+        let audioUnlocked = false;
+
+        // Unlock audio on first user interaction
+        document.addEventListener('click', () => {
+            if (!audioUnlocked) {
+                const silentAudio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+                silentAudio.play().then(() => {
+                    audioUnlocked = true;
+                    console.log('🔊 Audio unlocked');
+                }).catch(() => { });
+            }
+        }, { once: false });
+
+        async function playAudio(base64Audio) {
+            audioQueue.push(base64Audio);
+            processAudioQueue();
+        }
+
+        async function processAudioQueue() {
+            if (isPlayingAudio || audioQueue.length === 0) return;
+            isPlayingAudio = true;
+
+            const base64Audio = audioQueue.shift();
+
+            try {
+                const binaryString = atob(base64Audio);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                const audioBlob = new Blob([bytes], { type: 'audio/wav' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.volume = 1.0;
+
+                audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    isPlayingAudio = false;
+                    processAudioQueue(); // Play next in queue
+                };
+
+                audio.onerror = (e) => {
+                    console.error('Audio error:', e);
+                    isPlayingAudio = false;
+                    processAudioQueue();
+                };
+
+                await audio.play();
+                console.log('🔊 Playing translated audio');
+            } catch (err) {
+                console.error('Error playing audio:', err);
+                isPlayingAudio = false;
+                processAudioQueue();
+            }
+        }
+
+        // Mute button
+        muteBtn.addEventListener('click', () => {
+            isMuted = !isMuted;
+            muteBtn.classList.toggle('active', isMuted);
+            muteBtn.textContent = isMuted ? '🔈' : '🔇';
+            speakingText.textContent = isMuted ? 'Muted' : 'Listening...';
+        });
+
+        // End call button
+        endCallBtn.addEventListener('click', async () => {
+            if (confirm('End this call?')) {
+                // Cleanup
+                if (processor) processor.disconnect();
+                if (audioContext) audioContext.close();
+                if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+                if (ws) {
+                    ws.send(JSON.stringify({ event: 'disconnect' }));
+                    ws.close();
+                }
+
+                // Leave room
+                try {
+                    await fetch('/leave-room', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ roomId })
+                    });
+                } catch (e) { }
+
+                // Clear session and go home
+                sessionStorage.clear();
+                window.location.href = '/';
+            }
+        });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ event: 'disconnect' }));
+            }
+        });
+
+        // Start
+        init();
+    </script>
+</body>
+
+</html>
