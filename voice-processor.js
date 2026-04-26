@@ -184,7 +184,7 @@ class VoiceProcessor {
                         useEnhanced: true
                     },
                     interimResults: true,
-                    singleUtterance: false
+                    singleUtterance: true
                 })
                 .on("data", this._handleSTTData)
                 .on("error", this._handleSTTError)
@@ -220,6 +220,12 @@ class VoiceProcessor {
     }
 
     _handleSTTData(response) {
+        if (response.speechEventType === "END_OF_SINGLE_UTTERANCE") {
+            console.log("🏁 Google detected end of sentence");
+            this._finalizeSentence();
+            return;
+        }
+
         if (!response.results?.[0]) return;
 
         const result = response.results[0];
@@ -229,14 +235,14 @@ class VoiceProcessor {
         const isFinal = result.isFinal;
 
         if (isFinal) {
-            // ✅ REPLACE, don't append. Google's results are often cumulative.
             this.sentence = transcript;
-            this.lastInterim = ""; // Clear interim since we got final
+            this.lastInterim = ""; 
             console.log(`📝 Final Result: "${this.sentence}"`);
+            this._finalizeSentence(); // Finalize immediately in singleUtterance mode
         } else {
             // Save interim as backup (in case stream times out)
             const preview = this.sentence ? this.sentence + " " + transcript : transcript;
-            this.lastInterim = preview; // SAVE FOR BACKUP
+            this.lastInterim = preview; 
             console.log(`⏳ Speaking: "${preview}"`);
             this._sendToUI({ event: "transcript_interim", text: preview });
         }
@@ -291,9 +297,8 @@ class VoiceProcessor {
             this.sentenceTimer = null;
         }
 
-        // ✅ USE INTERIM BACKUP: If no "final" results arrived but we have interim speech
+        // Use interim backup if no final result
         if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
-            console.log(`🔄 Using interim backup for finalization: "${this.lastInterim}"`);
             this.sentence = this.lastInterim;
         }
 
@@ -302,52 +307,23 @@ class VoiceProcessor {
             return;
         }
 
-        let finalSentence = this.sentence.trim();
-
-        // ✅ UNLIMITED OVERLAP STRIP: Find the longest overlap between history and new text
-        if (this.streamHistory) {
-            const clean = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
-            const historyWords = clean(this.streamHistory).split(" ").filter(Boolean);
-            const currentWords = clean(finalSentence).split(" ").filter(Boolean);
-            const originalWords = finalSentence.split(/\s+/).filter(Boolean);
-
-            let maxOverlap = 0;
-            const checkLimit = Math.min(historyWords.length, currentWords.length);
-
-            // Check every possible overlap length
-            for (let i = 1; i <= checkLimit; i++) {
-                const historySuffix = historyWords.slice(-i).join(" ");
-                const currentPrefix = currentWords.slice(0, i).join(" ");
-                if (historySuffix === currentPrefix) {
-                    maxOverlap = i;
-                }
-            }
-
-            if (maxOverlap > 0) {
-                const stripped = originalWords.slice(maxOverlap).join(" ");
-                if (stripped) {
-                    console.log(`✂️ Stripped ${maxOverlap} words from total history. New part: "${stripped}"`);
-                    finalSentence = stripped;
-                } else {
-                    this.isFinalizing = false;
-                    this.sentence = "";
-                    return;
-                }
-            }
-        }
-
+        const finalSentence = this.sentence.trim();
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
         this.lastSentence = finalSentence;
-        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); 
         this.sentence = "";
         this.lastInterim = "";
 
-        // Add to queue and process
+        // Send for processing
         this.sentenceQueue.push(finalSentence);
         this._processQueue();
 
-        this.isFinalizing = false;
+        // ✅ RESTART IMMEDIATELY: Clear history for the next sentence
+        this._restartStream().then(() => {
+            this.isFinalizing = false;
+        }).catch(() => {
+            this.isFinalizing = false;
+        });
     }
 
     async _processQueue() {
