@@ -198,7 +198,11 @@ class VoiceProcessor {
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         useEnhanced: true,
-                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "latest_short"
+                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "latest_short",
+                        speechContexts: [{
+                            phrases: ["hello", "how are you", "namaste", "bagunnara", "dhanyavadalu", "kshaminchandi"],
+                            boost: 20.0
+                        }]
                     },
                     interimResults: true,
                     singleUtterance: false
