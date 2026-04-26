@@ -319,9 +319,9 @@ class VoiceProcessor {
         let timeout = this.SENTENCE_TIMEOUT;
         const langCode = this._getLangCode(this.myLanguage);
         
-        // 🚀 Language-specific timeouts
+        // 🚀 Language-specific timeouts (Phone Call Refined)
         if (langCode.startsWith("en-")) {
-            timeout = 1000; // 1.0s (Restored from perfect English commit)
+            timeout = 700; // 0.7s (Faster than standard, slower than fragmented)
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
@@ -539,7 +539,7 @@ class VoiceProcessor {
             const [response] = await this.ttsClient.synthesizeSpeech({
                 input: { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.1 }
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
             });
             return response.audioContent;
         } catch (e) {
