@@ -301,23 +301,34 @@ class VoiceProcessor {
             return;
         }
 
-        const finalSentence = this.sentence.trim();
+        let finalSentence = this.sentence.trim();
+
+        // ✅ STRIP HISTORY: If Google sent us the history of the whole stream, 
+        // remove the parts we already processed in the previous sentence.
+        if (this.lastSentence && finalSentence.startsWith(this.lastSentence)) {
+            const newPart = finalSentence.substring(this.lastSentence.length).trim();
+            if (newPart) {
+                console.log(`✂️ Stripped history. New part: "${newPart}"`);
+                finalSentence = newPart;
+            } else {
+                // It was all history, nothing new
+                this.isFinalizing = false;
+                this.sentence = "";
+                return;
+            }
+        }
+
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
-        this.lastSentence = finalSentence;
+        this.lastSentence = this.sentence.trim(); // Store the FULL history to strip next time
         this.sentence = "";
-        this.lastInterim = ""; // Clear interim after finalizing
-
-        // ✅ RESTART STREAM: This clears Google's internal history for the next sentence
-        this._restartStream().then(() => {
-            this.isFinalizing = false;
-        }).catch(() => {
-            this.isFinalizing = false;
-        });
+        this.lastInterim = ""; 
 
         // Add to queue and process
         this.sentenceQueue.push(finalSentence);
         this._processQueue();
+
+        this.isFinalizing = false;
     }
 
     async _processQueue() {
