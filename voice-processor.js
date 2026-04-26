@@ -46,7 +46,7 @@ class VoiceProcessor {
         this.lastSentence = "";       // Last processed sentence
         this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 1200; // Default: 1.2s (faster)
+        this.SENTENCE_TIMEOUT = 1000; // Default: 1.0s (faster)
 
         // Processing Queue
         this.sentenceQueue = [];
@@ -280,12 +280,24 @@ class VoiceProcessor {
     }
 
     _resetSentenceTimer() {
-        if (this.sentenceTimer) {
-            clearTimeout(this.sentenceTimer);
+        if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
+        
+        let timeout = this.SENTENCE_TIMEOUT;
+        const langCode = this._getLangCode(this.myLanguage);
+        
+        // English is very stable, can be very aggressive
+        if (langCode.startsWith("en-")) {
+            timeout = 800; 
+        } else {
+            const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
+            if (INDIAN_LANGS.includes(langCode)) {
+                timeout = 900; // Fast for Indian languages
+            }
         }
+
         this.sentenceTimer = setTimeout(() => {
             this._finalizeSentence();
-        }, this.SENTENCE_TIMEOUT);
+        }, timeout);
     }
 
     _finalizeSentence() {
