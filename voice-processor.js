@@ -304,16 +304,17 @@ class VoiceProcessor {
 
         let finalSentence = this.sentence.trim();
 
-        // ✅ SLIDING WINDOW OVERLAP STRIP: Find the longest overlap between history and new text
+        // ✅ UNLIMITED OVERLAP STRIP: Find the longest overlap between history and new text
         if (this.streamHistory) {
-            const historyWords = this.streamHistory.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").split(/\s+/).filter(Boolean);
-            const currentWords = finalSentence.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").split(/\s+/).filter(Boolean);
+            const clean = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
+            const historyWords = clean(this.streamHistory).split(" ").filter(Boolean);
+            const currentWords = clean(finalSentence).split(" ").filter(Boolean);
             const originalWords = finalSentence.split(/\s+/).filter(Boolean);
 
-            // Find the maximum overlap (checking up to the last 20 words of history)
             let maxOverlap = 0;
-            const checkLimit = Math.min(historyWords.length, currentWords.length, 20);
+            const checkLimit = Math.min(historyWords.length, currentWords.length);
 
+            // Check every possible overlap length
             for (let i = 1; i <= checkLimit; i++) {
                 const historySuffix = historyWords.slice(-i).join(" ");
                 const currentPrefix = currentWords.slice(0, i).join(" ");
@@ -325,10 +326,9 @@ class VoiceProcessor {
             if (maxOverlap > 0) {
                 const stripped = originalWords.slice(maxOverlap).join(" ");
                 if (stripped) {
-                    console.log(`✂️ Stripped ${maxOverlap} overlapping words. New part: "${stripped}"`);
+                    console.log(`✂️ Stripped ${maxOverlap} words from total history. New part: "${stripped}"`);
                     finalSentence = stripped;
                 } else {
-                    // It was all overlap
                     this.isFinalizing = false;
                     this.sentence = "";
                     return;
