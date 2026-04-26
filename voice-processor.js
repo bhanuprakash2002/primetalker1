@@ -308,13 +308,13 @@ class VoiceProcessor {
         let timeout = this.SENTENCE_TIMEOUT;
         const langCode = this._getLangCode(this.myLanguage);
         
-        // English is very stable, can be very aggressive
+        // English is very stable, can be hyper-aggressive
         if (langCode.startsWith("en-")) {
-            timeout = 800; 
+            timeout = 400; // 0.4s (Near instant)
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 900; // Fast for Indian languages
+                timeout = 900; // 0.9s for Indian languages
             }
         }
 
