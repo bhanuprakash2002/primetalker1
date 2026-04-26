@@ -384,18 +384,13 @@ class VoiceProcessor {
         
         this._processQueue();
 
-        // ✅ SELECTIVE RESTART: Only restart for Native languages (to prevent bundling)
-        // For English, Google handles long-form perfectly without restarts.
-        const isEnglish = (this.myLanguage || "en").startsWith("en");
-        if (!isEnglish) {
-            this._restartStream().then(() => {
-                this.isFinalizing = false;
-            }).catch(() => {
-                this.isFinalizing = false;
-            });
-        } else {
+        // ✅ MANDATORY RESTART: Clear Google's memory for the next sentence
+        // This ensures words from the previous sentence never mix with the next one.
+        this._restartStream().then(() => {
             this.isFinalizing = false;
-        }
+        }).catch(() => {
+            this.isFinalizing = false;
+        });
     }
 
     async _processQueue() {
