@@ -194,7 +194,7 @@ class VoiceProcessor {
                         useEnhanced: true
                     },
                     interimResults: true,
-                    singleUtterance: true
+                    singleUtterance: false
                 })
                 .on("data", this._handleSTTData)
                 .on("error", this._handleSTTError)
@@ -243,12 +243,6 @@ class VoiceProcessor {
     }
 
     _handleSTTData(response) {
-        if (response.speechEventType === "END_OF_SINGLE_UTTERANCE") {
-            console.log("🏁 Google detected end of sentence");
-            this._finalizeSentence();
-            return;
-        }
-
         if (!response.results?.[0]) return;
 
         const result = response.results[0];
@@ -261,7 +255,6 @@ class VoiceProcessor {
             this.sentence = transcript;
             this.lastInterim = ""; 
             console.log(`📝 Final Result: "${this.sentence}"`);
-            this._finalizeSentence(); // Finalize immediately in singleUtterance mode
         } else {
             // Save interim as backup (in case stream times out)
             const preview = this.sentence ? this.sentence + " " + transcript : transcript;
@@ -342,10 +335,43 @@ class VoiceProcessor {
             return;
         }
 
-        const finalSentence = this.sentence.trim();
+        let finalSentence = this.sentence.trim();
+
+        // ✅ SLIDING WINDOW OVERLAP STRIP: Find the longest overlap between history and new text
+        if (this.streamHistory) {
+            const clean = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
+            const historyWords = clean(this.streamHistory).split(" ").filter(Boolean);
+            const currentWords = clean(finalSentence).split(" ").filter(Boolean);
+            const originalWords = finalSentence.split(/\s+/).filter(Boolean);
+
+            let maxOverlap = 0;
+            const checkLimit = Math.min(historyWords.length, currentWords.length);
+
+            for (let i = 1; i <= checkLimit; i++) {
+                const historySuffix = historyWords.slice(-i).join(" ");
+                const currentPrefix = currentWords.slice(0, i).join(" ");
+                if (historySuffix === currentPrefix) {
+                    maxOverlap = i;
+                }
+            }
+
+            if (maxOverlap > 0) {
+                const stripped = originalWords.slice(maxOverlap).join(" ");
+                if (stripped) {
+                    console.log(`✂️ Stripped ${maxOverlap} words from total history. New part: "${stripped}"`);
+                    finalSentence = stripped;
+                } else {
+                    this.isFinalizing = false;
+                    this.sentence = "";
+                    return;
+                }
+            }
+        }
+
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
         this.lastSentence = finalSentence;
+        this.streamHistory = (this.streamHistory + " " + finalSentence).trim(); 
         this.sentence = "";
         this.lastInterim = "";
 
@@ -353,12 +379,7 @@ class VoiceProcessor {
         this.sentenceQueue.push(finalSentence);
         this._processQueue();
 
-        // ✅ RESTART IMMEDIATELY: Clear history for the next sentence
-        this._restartStream().then(() => {
-            this.isFinalizing = false;
-        }).catch(() => {
-            this.isFinalizing = false;
-        });
+        this.isFinalizing = false;
     }
 
     async _processQueue() {
