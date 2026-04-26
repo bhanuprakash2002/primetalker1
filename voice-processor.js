@@ -342,7 +342,11 @@ class VoiceProcessor {
 
                 // 4. Send audio
                 if (audio && partner.ws?.readyState === 1) {
-                    const wav = this._toWav(audio, 48000);
+                    // Google TTS LINEAR16 sometimes returns a WAV header already.
+                    // If it does, don't prepend another one to avoid corrupted audio starts.
+                    const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
+                    const wav = isRiff ? audio : this._toWav(audio, 48000);
+
                     partner.ws.send(JSON.stringify({
                         event: "audio_playback",
                         audio: wav.toString("base64"),
