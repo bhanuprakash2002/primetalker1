@@ -198,7 +198,7 @@ class VoiceProcessor {
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         useEnhanced: true,
-                        model: "latest_short"   // 🚀 High-speed model
+                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "latest_short"
                     },
                     interimResults: true,
                     singleUtterance: false
@@ -319,9 +319,9 @@ class VoiceProcessor {
         let timeout = this.SENTENCE_TIMEOUT;
         const langCode = this._getLangCode(this.myLanguage);
         
-        // 🚀 Aggressive but sane timeouts
+        // 🚀 Language-specific timeouts
         if (langCode.startsWith("en-")) {
-            timeout = 500; // 0.5s
+            timeout = 1000; // 1.0s (Restored from perfect English commit)
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
@@ -380,12 +380,18 @@ class VoiceProcessor {
         
         this._processQueue();
 
-        // ✅ RESTART IMMEDIATELY: Clear Google's memory for the next sentence
-        this._restartStream().then(() => {
+        // ✅ SELECTIVE RESTART: Only restart for Native languages (to prevent bundling)
+        // For English, Google handles long-form perfectly without restarts.
+        const isEnglish = (this.myLanguage || "en").startsWith("en");
+        if (!isEnglish) {
+            this._restartStream().then(() => {
+                this.isFinalizing = false;
+            }).catch(() => {
+                this.isFinalizing = false;
+            });
+        } else {
             this.isFinalizing = false;
-        }).catch(() => {
-            this.isFinalizing = false;
-        });
+        }
     }
 
     async _processQueue() {
@@ -533,7 +539,7 @@ class VoiceProcessor {
             const [response] = await this.ttsClient.synthesizeSpeech({
                 input: { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000, speakingRate: 1.1 }
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.1 }
             });
             return response.audioContent;
         } catch (e) {
