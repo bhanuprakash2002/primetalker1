@@ -31,6 +31,7 @@ class VoiceProcessor {
         this.isStreaming = false;
         this.isStartingStream = false; // Prevents multiple parallel start attempts
         this.streamCreatedAt = 0;
+        this.lastAudioTime = 0;        // Track last audio received (for idle detection)
         this.audioBuffer = [];         // Buffers audio while connection is opening
 
         // Sentence building - THE KEY FIX
@@ -97,6 +98,7 @@ class VoiceProcessor {
     async _processAudio(base64Audio) {
         if (!this.myLanguage) return;
 
+        this.lastAudioTime = Date.now(); // Track when we last received audio
         const buffer = Buffer.from(base64Audio, "base64");
 
         // If currently starting, buffer the audio so we don't lose the first words
@@ -158,8 +160,9 @@ class VoiceProcessor {
                 .on("end", () => {
                     this.isStreaming = false;
                     this.recognizeStream = null;
-                    // Continuous: immediately restart on end
-                    if (this.myLanguage && this.ws?.readyState === 1) {
+                    // Only restart if audio received in last 30s (prevent idle spam)
+                    const idleMs = Date.now() - this.lastAudioTime;
+                    if (this.myLanguage && this.ws?.readyState === 1 && idleMs < 30000) {
                         this._startStream();
                     }
                 });
@@ -193,11 +196,11 @@ class VoiceProcessor {
     }
 
     async _restartStream() {
+        // Only save in-progress finals (not interim) — saving interim causes sentences to compound
         const savedSentence = this.sentence;
-        const savedInterim = this.lastInterim;
         await this._stopStream();
         this.sentence = savedSentence;
-        this.lastInterim = savedInterim;
+        // lastInterim is intentionally NOT restored — it resets per sentence
         await this._startStream();
     }
 
