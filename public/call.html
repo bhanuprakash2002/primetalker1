@@ -239,16 +239,16 @@
                     audio: {
                         echoCancellation: true,
                         noiseSuppression: true,
-                        sampleRate: 48000,
+                        sampleRate: 16000,
                         channelCount: 1
                     }
                 });
 
-                audioContext = new AudioContext({ sampleRate: 48000 });
+                audioContext = new AudioContext({ sampleRate: 16000 });
                 const source = audioContext.createMediaStreamSource(mediaStream);
 
-                // Larger buffer for fewer callbacks
-                processor = audioContext.createScriptProcessor(8192, 1, 1);
+                // Buffer size: 4096 at 16kHz is 256ms
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
 
                 processor.onaudioprocess = (e) => {
                     if (isMuted) return;
@@ -287,12 +287,17 @@
                     }
                     audioChunks = [];
 
-                    // Send to server
-                    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(combined.buffer)));
-                    ws.send(JSON.stringify({
-                        event: 'audio',
-                        audio: base64Audio
-                    }));
+                    // Send to server (Safe & Fast Base64)
+                    const blob = new Blob([combined.buffer]);
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        const base64Audio = reader.result.split(',')[1];
+                        ws.send(JSON.stringify({
+                            event: 'audio',
+                            audio: base64Audio
+                        }));
+                    };
+                    reader.readAsDataURL(blob);
                 }, 200);
 
                 speakingText.textContent = 'Listening...';

@@ -46,7 +46,7 @@ class VoiceProcessor {
         this.lastSentence = "";       // Last processed sentence
         this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 600;  // 🚀 Base timeout reduced
+        this.SENTENCE_TIMEOUT = 1200; // 🚀 Increased base timeout to prevent cutting
 
         // Processing Queue
         this.sentenceQueue = [];
@@ -76,8 +76,8 @@ class VoiceProcessor {
                 // ✅ Dynamic sentence timeout: faster for Indian languages
                 const baseLang = (this.myLanguage || 'en').split('-')[0];
                 if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 600; // 0.6s for Indian languages
-                    console.log(`⚡ Indian language detected (${baseLang}), using fast timeout: ${this.SENTENCE_TIMEOUT}ms`);
+                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
+                    console.log(`⚡ Indian language detected (${baseLang}), using timeout: ${this.SENTENCE_TIMEOUT}ms`);
                 }
 
                 // Pre-warm STT stream after a short delay to reduce cold-start latency
@@ -159,10 +159,14 @@ class VoiceProcessor {
             this._startStream();
         }
 
-        // Check if we need to restart (Google has ~60s limit)
+        // Check if we need to restart (Google has ~305s limit)
         const streamAge = Date.now() - this.streamCreatedAt;
-        if (streamAge > 50000) { // Restart every 50s for safety
-            console.log("🔄 Restarting stream (age limit)");
+        if (streamAge > 240000) { // Restart every 4 minutes for safety
+            console.log("🔄 Restarting stream (age limit reached)");
+            // Finalize whatever we have before restarting so it's not lost
+            if (this.sentence || this.lastInterim) {
+                this._finalizeSentence();
+            }
             await this._restartStream();
             // Buffer this chunk since we just triggered a restart
             this.audioBuffer.push(buffer);
@@ -194,13 +198,13 @@ class VoiceProcessor {
                 .streamingRecognize({
                     config: {
                         encoding: "LINEAR16",
-                        sampleRateHertz: 48000,
+                        sampleRateHertz: 16000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         useEnhanced: true,
                         model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "latest_short",
                         speechContexts: [{
-                            phrases: ["hello", "how are you", "namaste", "bagunnara", "dhanyavadalu", "kshaminchandi"],
+                            phrases: ["did you eat", "how are you", "what are you doing", "namaste", "bagunnara"],
                             boost: 20.0
                         }]
                     },
@@ -248,7 +252,8 @@ class VoiceProcessor {
         this.isRestarting = true;
         
         await this._stopStream();
-        this.sentence = "";      
+        // We DON'T clear this.sentence here anymore, 
+        // it should have been finalized or we want to keep it.
         this.lastInterim = "";   
         await this._startStream();
         
@@ -279,18 +284,11 @@ class VoiceProcessor {
             console.log(`⏳ Speaking: "${preview}"`);
             this._sendToUI({ event: "transcript_interim", text: preview });
 
-            // 🚀 Trigger early finalize when user pauses (ends in . or ?)
-            if (transcript.endsWith(".") || transcript.endsWith("?")) {
-                this._finalizeSentence();
-            }
+            // 🚀 Do NOT finalize on interim punctuation anymore (it's too aggressive)
+            // The timer and isFinal will handle it more reliably.
         }
 
-        // 🚀 SMART FINALIZE: If Google adds a period or question mark, finalize INSTANTLY
-        if (transcript.endsWith(".") || transcript.endsWith("?")) {
-            console.log("🎯 Punctuation detected, finalizing early...");
-            this._finalizeSentence();
-            return;
-        }
+
 
         // Reset timer - user is still speaking
         this._resetSentenceTimer();
@@ -332,11 +330,11 @@ class VoiceProcessor {
         
         // 🚀 Language-specific timeouts (Phone Call Refined)
         if (langCode.startsWith("en-")) {
-            timeout = 700; // 0.7s (Faster than standard, slower than fragmented)
+            timeout = 1500; // 1.5s (Standard for conversational English)
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 500; // 0.5s for Indian languages
+                timeout = 1200; // 1.2s for Indian languages
             }
         }
 
@@ -348,9 +346,9 @@ class VoiceProcessor {
     _finalizeSentence() {
         if (this.isFinalizing) return;
 
-        // 🛑 STRONG ECHO GUARD: 700ms
+        // 🛑 STRONG ECHO GUARD: 300ms
         const now = Date.now();
-        if (now - this.lastFinalizeTime < 700) {
+        if (now - this.lastFinalizeTime < 300) {
             return;
         }
 
@@ -391,13 +389,9 @@ class VoiceProcessor {
         
         this._processQueue();
 
-        // ✅ MANDATORY RESTART: Clear Google's memory for the next sentence
-        // This ensures words from the previous sentence never mix with the next one.
-        this._restartStream().then(() => {
-            this.isFinalizing = false;
-        }).catch(() => {
-            this.isFinalizing = false;
-        });
+        // No more mandatory restart on every sentence!
+        // We only restart when the 50s limit is reached or on errors.
+        this.isFinalizing = false;
     }
 
     async _processQueue() {
@@ -556,8 +550,8 @@ class VoiceProcessor {
 
     _getLangCode(lang) {
         const map = {
-            // English
-            en: "en-US",
+            // English - Using en-IN for better local accent support
+            en: "en-IN",
             // ✅ All Indian languages (previously missing: bn, gu, kn, ml, mr, pa, ur)
             hi: "hi-IN", te: "te-IN", ta: "ta-IN",
             bn: "bn-IN", gu: "gu-IN", kn: "kn-IN",
