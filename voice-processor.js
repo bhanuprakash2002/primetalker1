@@ -255,13 +255,12 @@ class VoiceProcessor {
                         encoding:                   "LINEAR16",
                         sampleRateHertz:            16000,
                         languageCode:               langCode,
-                        enableAutomaticPunctuation: false, // OFF: causes mid-sentence cuts
-                        useEnhanced:                true,
-                        // latest_long for English at 16kHz, default for Indian scripts
-                        // NOTE: 'telephony' model requires 8kHz - we use 16kHz so can't use it
-                        model: isEnglish ? "latest_long" : "default",
+                        enableAutomaticPunctuation: false,
+                        // useEnhanced ONLY for English — not supported for Indian languages
+                        // Using it for te-IN/hi-IN etc causes stream to be rejected silently
+                        ...(isEnglish ? { useEnhanced: true, model: "latest_long" } : {}),
                     },
-                    interimResults: true,
+                    interimResults:  true,
                     singleUtterance: false,
                 })
                 .on("data",  this._onSTTData)
