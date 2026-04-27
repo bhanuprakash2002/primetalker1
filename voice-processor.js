@@ -1,157 +1,75 @@
-// voice-processor.js — Continuous Stream, 48kHz, Perfect Translation
-const speech       = require("@google-cloud/speech");
+// voice-processor.js - Robust Live Translation with Sentence Accumulation
+const speech = require("@google-cloud/speech");
 const textToSpeech = require("@google-cloud/text-to-speech");
 const { Translate } = require("@google-cloud/translate").v2;
 
-// ─── Google credentials ───────────────────────────────────────────────────────
 let googleCredentials = null;
 if (process.env.GOOGLE_CREDENTIALS) {
-    try { googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS); }
-    catch (e) { console.error("Bad GOOGLE_CREDENTIALS:", e.message); }
-}
-const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
-
-// ─── Singleton clients — created once per process (saves ~300ms per connection)
-const sharedSpeech    = new speech.SpeechClient(clientConfig);
-const sharedTts       = new textToSpeech.TextToSpeechClient(clientConfig);
-const sharedTranslate = new Translate(clientConfig);
-
-// ─── Language tables ──────────────────────────────────────────────────────────
-const STT_LANG_MAP = {
-    en:"en-US", hi:"hi-IN", te:"te-IN", ta:"ta-IN", kn:"kn-IN",
-    ml:"ml-IN", mr:"mr-IN", bn:"bn-IN", gu:"gu-IN", pa:"pa-IN", ur:"ur-IN",
-    es:"es-ES", fr:"fr-FR", de:"de-DE", it:"it-IT", pt:"pt-BR",
-    ar:"ar-XA", ja:"ja-JP", ko:"ko-KR", zh:"cmn-CN", ru:"ru-RU",
-    nl:"nl-NL", pl:"pl-PL", tr:"tr-TR", vi:"vi-VN", th:"th-TH",
-};
-
-const TTS_VOICE_MAP = {
-    en:  { languageCode:"en-US",  name:"en-US-Neural2-J" },
-    hi:  { languageCode:"hi-IN",  name:"hi-IN-Neural2-A" },
-    te:  { languageCode:"te-IN",  name:"te-IN-Standard-A" },
-    ta:  { languageCode:"ta-IN",  name:"ta-IN-Standard-A" },
-    kn:  { languageCode:"kn-IN",  name:"kn-IN-Standard-A" },
-    ml:  { languageCode:"ml-IN",  name:"ml-IN-Standard-A" },
-    mr:  { languageCode:"mr-IN",  name:"mr-IN-Standard-A" },
-    bn:  { languageCode:"bn-IN",  name:"bn-IN-Standard-A" },
-    gu:  { languageCode:"gu-IN",  name:"gu-IN-Standard-A" },
-    pa:  { languageCode:"pa-IN",  name:"pa-IN-Standard-A" },
-    es:  { languageCode:"es-ES",  name:"es-ES-Neural2-A" },
-    fr:  { languageCode:"fr-FR",  name:"fr-FR-Neural2-A" },
-    de:  { languageCode:"de-DE",  name:"de-DE-Neural2-A" },
-    pt:  { languageCode:"pt-BR",  name:"pt-BR-Neural2-A" },
-    it:  { languageCode:"it-IT",  name:"it-IT-Neural2-A" },
-    ru:  { languageCode:"ru-RU",  name:"ru-RU-Standard-A" },
-    zh:  { languageCode:"cmn-CN", name:"cmn-CN-Standard-A" },
-    ja:  { languageCode:"ja-JP",  name:"ja-JP-Neural2-B" },
-    ko:  { languageCode:"ko-KR",  name:"ko-KR-Neural2-A" },
-    ar:  { languageCode:"ar-XA",  name:"ar-XA-Standard-A" },
-    tr:  { languageCode:"tr-TR",  name:"tr-TR-Neural2-A" },
-    nl:  { languageCode:"nl-NL",  name:"nl-NL-Neural2-A" },
-    pl:  { languageCode:"pl-PL",  name:"pl-PL-Neural2-A" },
-    vi:  { languageCode:"vi-VN",  name:"vi-VN-Neural2-A" },
-    th:  { languageCode:"th-TH",  name:"th-TH-Neural2-C" },
-};
-
-// STT model per language:
-// - Only specify models we KNOW work for that language
-// - Leave undefined → Google uses its default (always safe)
-const STT_MODEL_MAP = {
-    en: "latest_long",   // best for English dictation
-    hi: "latest_short",  // confirmed supported for hi-IN, lower latency
-    es: "latest_long", fr: "latest_long", de: "latest_long",
-    pt: "latest_long", ja: "latest_long", ko: "latest_long",
-    zh: "latest_long", ru: "latest_long",
-    // te, ta, kn, ml, mr, bn, gu, pa → undefined → Google default (safe)
-};
-
-// Languages that support useEnhanced (Indian script langs don't)
-const ENHANCED_LANGS = new Set(["en","es","fr","de","pt","it","ru","zh","ja","ko","nl","pl","tr","vi","th","ar"]);
-
-const SAMPLE_RATE = 48000; // 48kHz: matches browser native output
-
-function langBase(lang) { return (lang || "en").split("-")[0].toLowerCase(); }
-
-function sttLangCode(lang) {
-    return STT_LANG_MAP[langBase(lang)] || "en-US";
+    googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 }
 
-function buildWav(pcm, rate) {
-    const h = Buffer.alloc(44);
-    h.write("RIFF", 0);           h.writeUInt32LE(36 + pcm.length, 4);
-    h.write("WAVE", 8);           h.write("fmt ", 12);
-    h.writeUInt32LE(16, 16);      h.writeUInt16LE(1, 20);  // PCM
-    h.writeUInt16LE(1, 22);       h.writeUInt32LE(rate, 24); // mono
-    h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32);
-    h.writeUInt16LE(16, 34);      h.write("data", 36);
-    h.writeUInt32LE(pcm.length, 40);
-    return Buffer.concat([h, pcm]);
-}
-
-// ─── VoiceProcessor ───────────────────────────────────────────────────────────
 class VoiceProcessor {
-    constructor(ws, activeSessions) {
-        this.ws             = ws;
+    constructor(websocket, activeSessions) {
+        this.ws = websocket;
         this.activeSessions = activeSessions;
 
-        // Shared clients
-        this.speechClient    = sharedSpeech;
-        this.ttsClient       = sharedTts;
-        this.translateClient = sharedTranslate;
+        const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
+        this.speechClient = new speech.SpeechClient(clientConfig);
+        this.ttsClient = new textToSpeech.TextToSpeechClient(clientConfig);
+        this.translateClient = new Translate(googleCredentials ? { credentials: googleCredentials } : {});
 
-        // Identity
-        this.roomId     = null;
-        this.userType   = null;
+        this.roomId = null;
+        this.userType = null;
         this.myLanguage = null;
-        this.myName     = null;
+        this.myName = null;
 
-        // Continuous STT stream state
-        this.recognizeStream  = null;
-        this.isStreaming       = false;
-        this.isStartingStream  = false;   // true while Google stream is being created
-        this.streamCreatedAt   = 0;
-        this.audioBuffer       = [];      // buffers audio during startup gap
+        this.recognizeStream = null;
+        this.isStreaming = false;
+        this.isStartingStream = false; // FIX: prevents parallel _startStream calls
+        this.streamCreatedAt = 0;
+        this.audioBuffer = [];         // FIX: buffer audio during startup gap
 
-        // Sentence accumulation (isFinal events → sentence → translate)
-        this.sentence      = "";   // accumulated isFinal text
-        this.lastInterim   = "";   // latest interim (fallback if stream times out)
-        this.lastSentence  = "";   // last translated sentence (dedup guard)
+        this.sentence = "";
+        this.lastInterim = "";
+        this.lastSentence = "";
         this.sentenceTimer = null;
-        this.SENTENCE_MS   = 900;  // ms after last speech → finalize
+        this.SENTENCE_TIMEOUT = 1000;
 
-        // Translation pipeline
-        this.isProcessing  = false;   // one translation at a time per speaker
+        this.isProcessing = false;
 
-        // Caches
-        this.translateCache = new Map(); // "text|from|to" → translated
-        this.ttsCache       = new Map(); // "text|lang"    → audioBuffer
+        this.translationCache = new Map();
+        this.ttsCache = new Map();
+        this.MAX_TRANSLATION_CACHE = 100;
+        this.MAX_TTS_CACHE = 50;
 
-        // Bind STT callbacks
-        this._onData  = this._onData.bind(this);
-        this._onError = this._onError.bind(this);
+        this._handleSTTData = this._handleSTTData.bind(this);
+        this._handleSTTError = this._handleSTTError.bind(this);
     }
 
-    // ── Entry point ───────────────────────────────────────────────────────────
     async handleMessage(msg) {
         switch (msg.event) {
             case "connected":
-                this.roomId     = msg.roomId;
-                this.userType   = msg.userType;
+                this.roomId = msg.roomId;
+                this.userType = msg.userType;
                 this.myLanguage = msg.myLanguage;
-                this.myName     = msg.myName || "User";
-                console.log(`✅ [${this.userType}] room=${this.roomId} lang=${this.myLanguage}`);
+                this.myName = msg.myName || "User";
+                console.log(`✅ ${this.userType} connected in ${this.roomId} (${this.myLanguage})`);
                 this._registerConnection();
                 this._notifyPartner("user_joined", { name: this.myName, language: this.myLanguage });
-
-                // Start stream immediately + warm up with silence so model loads before first word
-                this._startStream().then(() => this._sendWarmupSilence());
-                this._warmUpAPIs();
+                if (!this.isStreaming && !this.isStartingStream) {
+                    console.log(`🔥 Pre-warming STT for ${this.myLanguage}...`);
+                    this._startStream().then(() => {
+                        if (this.recognizeStream) {
+                            const silence = Buffer.alloc(9600);
+                            try { this.recognizeStream.write(silence); } catch (e) {}
+                            console.log(`🔥 Warmup sent for ${this.myLanguage}`);
+                        }
+                    });
+                }
                 break;
-
             case "audio":
-                this._processAudio(msg.audio);
+                await this._processAudio(msg.audio);
                 break;
-
             case "disconnect":
             case "stop":
                 await this.cleanup();
@@ -159,235 +77,213 @@ class VoiceProcessor {
         }
     }
 
-    // ── Audio pipeline ────────────────────────────────────────────────────────
-    _processAudio(base64Audio) {
+    _registerConnection() {
+        const session = this.activeSessions.get(this.roomId);
+        if (!session) return;
+        if (this.userType === "caller") session.callerConnection = this;
+        else session.receiverConnection = this;
+    }
+
+    async _processAudio(base64Audio) {
         if (!this.myLanguage) return;
-        const buf = Buffer.from(base64Audio, "base64");
+        const buffer = Buffer.from(base64Audio, "base64");
 
-        // Stream not ready yet → buffer so no audio is lost
-        if (this.isStartingStream || !this.isStreaming || !this.recognizeStream) {
-            this.audioBuffer.push(buf);
-            if (this.audioBuffer.length > 150) this.audioBuffer.shift(); // ~15s cap
+        // FIX: buffer audio while stream is being created so no words are lost
+        if (this.isStartingStream) {
+            this.audioBuffer.push(buffer);
+            if (this.audioBuffer.length > 150) this.audioBuffer.shift();
             return;
         }
 
-        // CONTINUOUS STREAM: only restart at Google's 4-minute hard limit
-        // No per-sentence restarts → zero startup delay between sentences
-        if (Date.now() - this.streamCreatedAt > 230000) { // 3m50s
-            console.log("🔄 4-min safety restart");
-            this._restartStream();
-            return;
+        if (!this.isStreaming) {
+            await this._startStream();
         }
 
-        // Write directly to live stream
-        try {
-            this.recognizeStream.write(buf);
-        } catch (e) {
-            console.error("Write error:", e.message);
-            this._restartStream();
+        const streamAge = Date.now() - this.streamCreatedAt;
+        if (streamAge > 50000) {
+            console.log("🔄 Restarting stream (age limit)");
+            await this._restartStream();
+        }
+
+        if (this.recognizeStream) {
+            try {
+                this.recognizeStream.write(buffer);
+            } catch (e) {
+                console.error("Write error:", e.message);
+                await this._restartStream();
+            }
         }
     }
 
-    // ── STT stream ────────────────────────────────────────────────────────────
     async _startStream() {
         if (this.isStreaming || this.isStartingStream) return;
         this.isStartingStream = true;
 
-        const lang     = langBase(this.myLanguage);
-        const langCode = sttLangCode(this.myLanguage);
-        const model    = STT_MODEL_MAP[lang];           // undefined = Google default
-        const enhanced = ENHANCED_LANGS.has(lang);
-
-        const config = {
-            encoding:                   "LINEAR16",
-            sampleRateHertz:            SAMPLE_RATE,
-            languageCode:               langCode,
-            enableAutomaticPunctuation: false,
-            ...(model    ? { model }            : {}),
-            ...(enhanced ? { useEnhanced: true } : {}),
-        };
-
-        console.log(`🎤 STT start [${langCode}] model=${model||"default"} enhanced=${enhanced}`);
+        const langCode = this._getLangCode(this.myLanguage);
+        const indianCodes = ["hi-IN", "te-IN", "ta-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "pa-IN"];
+        const model = indianCodes.includes(langCode) ? "latest_short" : "latest_long";
 
         try {
             this.recognizeStream = this.speechClient
-                .streamingRecognize({ config, interimResults: true, singleUtterance: false })
-                .on("data",  this._onData)
-                .on("error", this._onError)
-                .on("end",   () => {
-                    this.isStreaming     = false;
+                .streamingRecognize({
+                    config: {
+                        encoding: "LINEAR16",
+                        sampleRateHertz: 48000,
+                        languageCode: langCode,
+                        enableAutomaticPunctuation: true,
+                        model: model,
+                        useEnhanced: true
+                    },
+                    interimResults: true,
+                    singleUtterance: false
+                })
+                .on("data", this._handleSTTData)
+                .on("error", this._handleSTTError)
+                .on("end", () => {
+                    this.isStreaming = false;
                     this.recognizeStream = null;
-                    console.log(`🔴 STT ended [${langCode}]`);
-                    // Auto-restart if unexpected end (e.g. network blip)
-                    // Don't restart if we intentionally stopped (cleanup sets myLanguage null)
-                    if (this.myLanguage) setTimeout(() => this._restartStream(), 500);
                 });
 
-            this.isStreaming      = true;
+            this.isStreaming = true;
             this.isStartingStream = false;
-            this.streamCreatedAt  = Date.now();
-            console.log(`✅ STT live [${langCode}]`);
+            this.streamCreatedAt = Date.now();
+            console.log(`🎤 Stream started: ${langCode} (model: ${model})`);
 
-            // Replay audio buffered during startup
+            // FIX: replay audio buffered during startup
             if (this.audioBuffer.length > 0) {
                 const chunks = this.audioBuffer.splice(0);
                 chunks.forEach(c => { try { this.recognizeStream.write(c); } catch (_) {} });
                 console.log(`📡 Replayed ${chunks.length} buffered chunks`);
             }
         } catch (e) {
-            console.error("STT start failed:", e.message);
-            this.isStreaming      = false;
+            console.error("Failed to start stream:", e.message);
+            this.isStreaming = false;
             this.isStartingStream = false;
         }
     }
 
-    async _restartStream() {
-        if (this.isStartingStream) return;
-        console.log(`🔄 Restarting STT [${this.myLanguage}]`);
-        this.isStreaming = false;
+    async _stopStream() {
         if (this.recognizeStream) {
-            try { this.recognizeStream.end(); } catch (_) {}
-            this.recognizeStream = null;
+            try { this.recognizeStream.end(); } catch (e) {}
         }
+        this.recognizeStream = null;
+        this.isStreaming = false;
+        this.isStartingStream = false;
+    }
+
+    async _restartStream() {
+        const savedSentence = this.sentence;
+        await this._stopStream();
+        this.sentence = savedSentence;
         await this._startStream();
     }
 
-    // Send 200ms of silence so Google pre-loads the recognition model
-    _sendWarmupSilence() {
-        if (!this.recognizeStream || !this.isStreaming) return;
-        // 200ms @ 48kHz, 16-bit mono = 48000 * 0.2 * 2 bytes = 19200 bytes
-        const silence = Buffer.alloc(19200, 0);
-        try {
-            this.recognizeStream.write(silence);
-            console.log(`🔥 Warmup silence sent [${this.myLanguage}]`);
-        } catch (_) {}
-    }
-
-    // ── STT callbacks ─────────────────────────────────────────────────────────
-    _onData(response) {
-        const result = response.results?.[0];
-        if (!result) return;
+    _handleSTTData(response) {
+        if (!response.results?.[0]) return;
+        const result = response.results[0];
         const transcript = result.alternatives?.[0]?.transcript?.trim();
         if (!transcript) return;
 
         if (result.isFinal) {
-            // Accumulate confirmed text — user may say multiple phrases before pausing
-            this.sentence    = this.sentence ? `${this.sentence} ${transcript}` : transcript;
+            this.sentence = this.sentence ? this.sentence + " " + transcript : transcript;
             this.lastInterim = "";
-            console.log(`📝 Final: "${transcript}" | Buffer: "${this.sentence}"`);
+            console.log(`📝 Accumulated: "${this.sentence}"`);
         } else {
-            // Live interim — show immediately
-            const preview    = this.sentence ? `${this.sentence} ${transcript}` : transcript;
+            const preview = this.sentence ? this.sentence + " " + transcript : transcript;
             this.lastInterim = preview;
+            console.log(`⏳ Speaking: "${preview}"`);
             this._sendToUI({ event: "transcript_interim", text: preview });
         }
 
-        // Reset 900ms silence timer on every STT event
-        this._resetTimer();
+        this._resetSentenceTimer();
     }
 
-    _onError(err) {
-        const msg      = err?.message || "";
-        const isNormal = msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11;
-        if (!isNormal) console.error(`❌ STT Error [${this.myLanguage}]:`, msg);
-        else           console.log(`⏰ STT normal timeout [${this.myLanguage}]`);
+    _handleSTTError(err) {
+        const msg = err.message || "";
+        if (msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11) {
+            console.log("⏰ Stream timeout (normal)");
+        } else {
+            console.error("❌ STT Error:", msg);
+        }
 
-        this.isStreaming     = false;
+        this.isStreaming = false;
         this.recognizeStream = null;
 
-        // Fallback: if no finals yet, use last interim
         if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+            console.log(`🔄 Using interim backup: "${this.lastInterim}"`);
             this.sentence = this.lastInterim;
-            console.log(`🔄 Using interim: "${this.sentence}"`);
         }
-        this.lastInterim = "";
 
         if (this.sentence && this.sentence !== this.lastSentence) {
-            this._finalize();
+            this._finalizeSentence();
         }
 
-        // Always restart after error
-        if (this.myLanguage) setTimeout(() => this._restartStream(), 500);
+        this.lastInterim = "";
     }
 
-    // ── Sentence timer ────────────────────────────────────────────────────────
-    _resetTimer() {
+    _resetSentenceTimer() {
         if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
-        this.sentenceTimer = setTimeout(() => this._finalize(), this.SENTENCE_MS);
+        this.sentenceTimer = setTimeout(() => this._finalizeSentence(), this.SENTENCE_TIMEOUT);
     }
 
-    _finalize() {
+    _finalizeSentence() {
         if (this.sentenceTimer) { clearTimeout(this.sentenceTimer); this.sentenceTimer = null; }
+        if (!this.sentence || this.sentence === this.lastSentence) return;
 
-        const text = this.sentence.trim();
-        if (!text || text === this.lastSentence) {
-            this.sentence = "";
-            return;
-        }
-
-        console.log(`\n🔵 SENTENCE [${this.myLanguage}]: "${text}"\n`);
-        this.lastSentence = text;
-        this.sentence     = "";
-
-        // Translate (no stream restart needed — continuous stream stays alive)
-        this._translateAndSpeak(text);
+        const finalSentence = this.sentence.trim();
+        console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
+        this.lastSentence = finalSentence;
+        this.sentence = "";
+        this._translateAndSpeak(finalSentence);
     }
 
-    // ── Translation + TTS ─────────────────────────────────────────────────────
     async _translateAndSpeak(text) {
         if (this.isProcessing || !text) return;
         this.isProcessing = true;
-        const t0 = Date.now();
+        const start = Date.now();
 
         try {
             const session = this.activeSessions.get(this.roomId);
             if (!session) return;
-            const partner = this.userType === "caller"
-                ? session.receiverConnection
-                : session.callerConnection;
+            const partner = this.userType === "caller" ? session.receiverConnection : session.callerConnection;
             if (!partner?.myLanguage) { console.log("⚠️ Partner not connected"); return; }
 
-            // 1. Translate
             const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
-            console.log(`🌐 [${Date.now()-t0}ms] "${text}" → "${translated}"`);
+            console.log(`🌐 ${Date.now() - start}ms: "${text}" → "${translated}"`);
 
-            // 2. Send text to both UIs immediately (before TTS is ready)
-            const payload = {
+            const data = {
                 event: "translation", originalText: text, translatedText: translated,
-                fromUser: this.userType, fromLanguage: this.myLanguage, toLanguage: partner.myLanguage,
+                fromUser: this.userType, fromLanguage: this.myLanguage, toLanguage: partner.myLanguage
             };
-            this._sendToUI(payload);
-            partner._sendToUI(payload);
+            this._sendToUI(data);
+            partner._sendToUI(data);
 
-            // 3. Generate and send TTS audio (non-blocking)
+            // TTS non-blocking
             this._tts(translated, partner.myLanguage).then(audio => {
                 if (!audio || partner.ws?.readyState !== 1) return;
-                const wav = buildWav(audio, SAMPLE_RATE);
-                partner.ws.send(JSON.stringify({
-                    event: "audio_playback",
-                    audio: wav.toString("base64"),
-                    format: "wav",
-                }));
-                console.log(`🔊 TTS done [${Date.now()-t0}ms total]`);
+                const wav = this._toWav(audio, 48000);
+                partner.ws.send(JSON.stringify({ event: "audio_playback", audio: wav.toString("base64"), format: "wav" }));
+                console.log(`🔊 TTS done: ${Date.now() - start}ms total`);
             }).catch(e => console.error("TTS error:", e.message));
 
         } catch (e) {
-            console.error("translateAndSpeak error:", e.message);
+            console.error("Translation error:", e.message);
         } finally {
             this.isProcessing = false;
         }
     }
 
     async _translate(text, from, to) {
-        const f = langBase(from), t = langBase(to);
-        if (f === t) return text;
-        const key = `${text}|${f}|${t}`;
-        if (this.translateCache.has(key)) return this.translateCache.get(key);
+        const fromLang = (from || "en").split("-")[0];
+        const toLang = (to || "en").split("-")[0];
+        if (fromLang === toLang) return text;
+        const key = `${text}|${fromLang}|${toLang}`;
+        if (this.translationCache.has(key)) return this.translationCache.get(key);
         try {
-            const [result] = await this.translateClient.translate(text, { from: f, to: t });
-            if (this.translateCache.size >= 100)
-                this.translateCache.delete(this.translateCache.keys().next().value);
-            this.translateCache.set(key, result);
+            const [result] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
+            if (this.translationCache.size >= this.MAX_TRANSLATION_CACHE)
+                this.translationCache.delete(this.translationCache.keys().next().value);
+            this.translationCache.set(key, result);
             return result;
         } catch (e) {
             console.error("Translate error:", e.message);
@@ -396,84 +292,106 @@ class VoiceProcessor {
     }
 
     async _tts(text, lang) {
-        const b   = langBase(lang);
-        const key = `${text}|${b}`;
+        const voices = {
+            en: { languageCode: "en-US", name: "en-US-Neural2-J" },
+            hi: { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
+            te: { languageCode: "te-IN", name: "te-IN-Standard-A" },
+            ta: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
+            bn: { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
+            gu: { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
+            kn: { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
+            ml: { languageCode: "ml-IN", name: "ml-IN-Standard-A" },
+            mr: { languageCode: "mr-IN", name: "mr-IN-Standard-A" },
+            pa: { languageCode: "pa-IN", name: "pa-IN-Standard-A" },
+            es: { languageCode: "es-ES", name: "es-ES-Neural2-A" },
+            fr: { languageCode: "fr-FR", name: "fr-FR-Neural2-A" },
+            de: { languageCode: "de-DE", name: "de-DE-Neural2-A" },
+            pt: { languageCode: "pt-BR", name: "pt-BR-Neural2-A" },
+            it: { languageCode: "it-IT", name: "it-IT-Neural2-A" },
+            ru: { languageCode: "ru-RU", name: "ru-RU-Standard-A" },
+            zh: { languageCode: "cmn-CN", name: "cmn-CN-Standard-A" },
+            ja: { languageCode: "ja-JP", name: "ja-JP-Neural2-B" },
+            ko: { languageCode: "ko-KR", name: "ko-KR-Neural2-A" },
+            ar: { languageCode: "ar-XA", name: "ar-XA-Standard-A" },
+            tr: { languageCode: "tr-TR", name: "tr-TR-Neural2-A" },
+            nl: { languageCode: "nl-NL", name: "nl-NL-Neural2-A" },
+            pl: { languageCode: "pl-PL", name: "pl-PL-Neural2-A" },
+            vi: { languageCode: "vi-VN", name: "vi-VN-Neural2-A" },
+            th: { languageCode: "th-TH", name: "th-TH-Neural2-C" },
+        };
+        const base = (lang || "en").split("-")[0];
+        const voice = voices[base] || { languageCode: lang, ssmlGender: "NEUTRAL" };
+        const key = `${text}|${base}`;
         if (this.ttsCache.has(key)) return this.ttsCache.get(key);
-
-        const voice = TTS_VOICE_MAP[b] || { languageCode: STT_LANG_MAP[b] || "en-US", ssmlGender: "NEUTRAL" };
-        const cfg   = { audioEncoding: "LINEAR16", sampleRateHertz: SAMPLE_RATE, speakingRate: 1.1 };
-
         try {
-            const [res] = await this.ttsClient.synthesizeSpeech({ input: { text }, voice, audioConfig: cfg });
-            if (this.ttsCache.size >= 50)
+            const [response] = await this.ttsClient.synthesizeSpeech({
+                input: { text }, voice,
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
+            });
+            if (this.ttsCache.size >= this.MAX_TTS_CACHE)
                 this.ttsCache.delete(this.ttsCache.keys().next().value);
-            this.ttsCache.set(key, res.audioContent);
-            return res.audioContent;
+            this.ttsCache.set(key, response.audioContent);
+            return response.audioContent;
         } catch (e) {
-            console.error(`TTS error [${lang}]:`, e.message);
-            // Fallback: neutral gender, no specific voice name
+            console.error("TTS error:", e.message);
             try {
-                const [fb] = await this.ttsClient.synthesizeSpeech({
+                const [fallback] = await this.ttsClient.synthesizeSpeech({
                     input: { text },
-                    voice: { languageCode: voice.languageCode, ssmlGender: "NEUTRAL" },
-                    audioConfig: cfg,
+                    voice: { languageCode: voice.languageCode || lang, ssmlGender: "NEUTRAL" },
+                    audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
                 });
-                return fb.audioContent;
-            } catch (_) { return null; }
+                return fallback.audioContent;
+            } catch (e2) { return null; }
         }
     }
 
-    async _warmUpAPIs() {
-        setTimeout(async () => {
-            try {
-                await this.translateClient.translate("hello", { to: "en" });
-                console.log("🔥 Translate API warmed");
-            } catch (_) {}
-        }, 300);
+    _getLangCode(lang) {
+        const map = {
+            en: "en-US", hi: "hi-IN", te: "te-IN", ta: "ta-IN",
+            kn: "kn-IN", ml: "ml-IN", mr: "mr-IN", bn: "bn-IN",
+            gu: "gu-IN", pa: "pa-IN", ur: "ur-IN",
+            es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
+            ru: "ru-RU", zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR",
+            ar: "ar-XA", tr: "tr-TR", nl: "nl-NL", pl: "pl-PL",
+            vi: "vi-VN", th: "th-TH",
+        };
+        return map[(lang || "en").split("-")[0]] || "en-US";
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-    _registerConnection() {
-        const s = this.activeSessions.get(this.roomId);
-        if (!s) return;
-        if (this.userType === "caller") s.callerConnection   = this;
-        else                            s.receiverConnection = this;
+    _toWav(pcm, rate) {
+        const h = Buffer.alloc(44);
+        h.write("RIFF", 0);          h.writeUInt32LE(36 + pcm.length, 4);
+        h.write("WAVE", 8);          h.write("fmt ", 12);
+        h.writeUInt32LE(16, 16);     h.writeUInt16LE(1, 20);
+        h.writeUInt16LE(1, 22);      h.writeUInt32LE(rate, 24);
+        h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32);
+        h.writeUInt16LE(16, 34);     h.write("data", 36);
+        h.writeUInt32LE(pcm.length, 40);
+        return Buffer.concat([h, pcm]);
     }
 
     _sendToUI(data) {
-        try { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(data)); } catch (_) {}
+        try { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(data)); } catch (e) {}
     }
 
     _notifyPartner(event, data) {
-        const s = this.activeSessions.get(this.roomId);
-        if (!s) return;
-        const p = this.userType === "caller" ? s.receiverConnection : s.callerConnection;
-        if (p?.ws?.readyState === 1) p.ws.send(JSON.stringify({ event, ...data }));
+        const session = this.activeSessions.get(this.roomId);
+        if (!session) return;
+        const partner = this.userType === "caller" ? session.receiverConnection : session.callerConnection;
+        if (partner?.ws?.readyState === 1) partner.ws.send(JSON.stringify({ event, ...data }));
     }
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
     async cleanup() {
         if (this.sentenceTimer) { clearTimeout(this.sentenceTimer); this.sentenceTimer = null; }
-        if (this.sentence && this.sentence !== this.lastSentence) this._finalize();
-
-        // Signal auto-restart to stop
-        const lang = this.myLanguage;
-        this.myLanguage = null;
-
-        this.isStreaming      = false;
-        this.isStartingStream = false;
-        if (this.recognizeStream) {
-            try { this.recognizeStream.end(); } catch (_) {}
-            this.recognizeStream = null;
-        }
-
-        const s = this.activeSessions.get(this.roomId);
-        if (s) {
-            if (s.callerConnection   === this) s.callerConnection   = null;
-            if (s.receiverConnection === this) s.receiverConnection = null;
+        if (this.sentence && this.sentence !== this.lastSentence) this._finalizeSentence();
+        await this._stopStream();
+        const session = this.activeSessions.get(this.roomId);
+        if (session) {
+            if (session.callerConnection === this) session.callerConnection = null;
+            if (session.receiverConnection === this) session.receiverConnection = null;
         }
         this._notifyPartner("user_left", {});
-        console.log(`🧹 Cleanup: ${this.userType} [${lang}] in ${this.roomId}`);
+        console.log(`🧹 Cleanup: ${this.userType} in ${this.roomId}`);
     }
 }
 
