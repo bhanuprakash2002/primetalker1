@@ -41,6 +41,10 @@ class VoiceProcessor {
         this.sentenceTimer = null;    // Timer to finalize sentence
         this.SENTENCE_TIMEOUT = 1500; // 1.5s of silence = end of sentence
 
+        // Deduplication: track last 5 processed sentences to prevent any repeat
+        this._recentSentences = [];
+        this.MAX_RECENT = 5;
+
         // Processing lock
         this.isProcessing = false;
 
@@ -257,18 +261,17 @@ class VoiceProcessor {
         this.isStreaming = false;
         this.recognizeStream = null;
 
-        // Use interim as backup if no finals accumulated
-        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+        // Move interim to sentence BEFORE calling finalize (prevents double-use)
+        if (!this.sentence && this.lastInterim) {
             console.log(`🔄 Using interim backup: "${this.lastInterim}"`);
             this.sentence = this.lastInterim;
         }
+        this.lastInterim = ""; // clear now so _finalizeSentence can't re-use it
 
-        // Process any accumulated sentence
-        if (this.sentence && this.sentence !== this.lastSentence) {
+        // Process any accumulated sentence (dedup handled inside _finalizeSentence)
+        if (this.sentence) {
             this._finalizeSentence();
         }
-
-        this.lastInterim = "";
 
         // Continuous: immediately restart stream
         if (this.myLanguage && this.ws?.readyState === 1) {
@@ -293,22 +296,32 @@ class VoiceProcessor {
 
         // Use interim text as backup if no finals were accumulated
         // (very common for regional/Indian languages where Google sends mostly interims)
-        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+        if (!this.sentence && this.lastInterim) {
             console.log(`🔄 Using interim as sentence: "${this.lastInterim}"`);
             this.sentence = this.lastInterim;
             this.lastInterim = "";
         }
 
-        if (!this.sentence || this.sentence === this.lastSentence) {
+        const finalSentence = (this.sentence || "").trim();
+        this.sentence = "";
+        this.lastInterim = "";
+
+        if (!finalSentence) return;
+
+        // Strong dedup: reject if this exact sentence was already processed recently
+        if (this._recentSentences.includes(finalSentence)) {
+            console.log(`⏩ Skipping duplicate: "${finalSentence}"`);
             return;
         }
 
-        const finalSentence = this.sentence.trim();
         console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
 
+        // Track in recent history (rolling window)
+        this._recentSentences.push(finalSentence);
+        if (this._recentSentences.length > this.MAX_RECENT) {
+            this._recentSentences.shift();
+        }
         this.lastSentence = finalSentence;
-        this.sentence = "";
-        this.lastInterim = "";
 
         // Translate and speak (queued, never dropped)
         this._queueTranslation(finalSentence);
