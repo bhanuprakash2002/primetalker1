@@ -204,24 +204,27 @@ class VoiceProcessor {
         if (!this.myLanguage) return;
         const buffer = Buffer.from(base64Audio, "base64");
 
-        if (this.isRestarting) {
-            // Safety: if restart is stuck for >4s, force-clear the flag
+        // Buffer during ANY transition phase (restarting OR starting)
+        if (this.isRestarting || this.isStartingStream) {
             if (!this._restartStartedAt) this._restartStartedAt = Date.now();
-            if (Date.now() - this._restartStartedAt > 4000) {
-                console.warn("⚠️ isRestarting stuck — force-clearing");
+            // Safety: force-clear if stuck >5s
+            if (Date.now() - this._restartStartedAt > 5000) {
+                console.warn("⚠️ Stream transition stuck — force-clearing");
                 this.isRestarting = false;
+                this.isStartingStream = false;
                 this._restartStartedAt = 0;
             } else {
                 this.audioBuffer.push(buffer);
-                if (this.audioBuffer.length > 60) this.audioBuffer.shift();
+                if (this.audioBuffer.length > 100) this.audioBuffer.shift();
                 return;
             }
         } else {
             this._restartStartedAt = 0;
         }
 
-        if (!this.isStreaming && !this.isStartingStream) {
+        if (!this.isStreaming) {
             this._startStream();
+            return;
         }
 
         // Safety restart (Google 305s limit)
@@ -430,9 +433,8 @@ class VoiceProcessor {
         this.lastFlushTime = now;
         this.currentUtterance = "";
 
-        // NO stream restart here — stream runs CONTINUOUSLY for the full call.
-        // Delta extraction handles Google's text accumulation cleanly.
-        // Stream only restarts at the 4-minute Google hard limit or on error.
+        // Restart stream to clear Google's context for the next sentence
+        setImmediate(() => this._restartStream());
 
         // Send to translation pipeline
         this.ttsQueue(() => this._translateAndSend(deltaText));
