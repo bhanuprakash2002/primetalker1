@@ -38,7 +38,7 @@ class VoiceProcessor {
         this.lastInterim = "";        // Backup: latest interim result
         this.lastSentence = "";       // Last processed sentence
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 1000; // 1s of silence = end of sentence (was 1.5s)
+        this.SENTENCE_TIMEOUT = 1500; // 1.5s of silence = end of sentence
 
         // Processing lock
         this.isProcessing = false;
@@ -262,6 +262,14 @@ class VoiceProcessor {
             this.sentenceTimer = null;
         }
 
+        // Use interim text as backup if no finals were accumulated
+        // (very common for regional/Indian languages where Google sends mostly interims)
+        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
+            console.log(`🔄 Using interim as sentence: "${this.lastInterim}"`);
+            this.sentence = this.lastInterim;
+            this.lastInterim = "";
+        }
+
         if (!this.sentence || this.sentence === this.lastSentence) {
             return;
         }
@@ -271,6 +279,7 @@ class VoiceProcessor {
 
         this.lastSentence = finalSentence;
         this.sentence = "";
+        this.lastInterim = "";
 
         // Translate and speak
         this._translateAndSpeak(finalSentence);
