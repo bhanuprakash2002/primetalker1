@@ -205,9 +205,19 @@ class VoiceProcessor {
         const buffer = Buffer.from(base64Audio, "base64");
 
         if (this.isRestarting) {
-            this.audioBuffer.push(buffer);
-            if (this.audioBuffer.length > 60) this.audioBuffer.shift();
-            return;
+            // Safety: if restart is stuck for >4s, force-clear the flag
+            if (!this._restartStartedAt) this._restartStartedAt = Date.now();
+            if (Date.now() - this._restartStartedAt > 4000) {
+                console.warn("⚠️ isRestarting stuck — force-clearing");
+                this.isRestarting = false;
+                this._restartStartedAt = 0;
+            } else {
+                this.audioBuffer.push(buffer);
+                if (this.audioBuffer.length > 60) this.audioBuffer.shift();
+                return;
+            }
+        } else {
+            this._restartStartedAt = 0;
         }
 
         if (!this.isStreaming && !this.isStartingStream) {
@@ -299,9 +309,15 @@ class VoiceProcessor {
     async _restartStream() {
         if (this.isRestarting) return;
         this.isRestarting = true;
-        this._stopStream();
-        await this._startStream();
-        this.isRestarting = false;
+        try {
+            this._stopStream();
+            await this._startStream();
+        } catch (e) {
+            console.error("Restart error:", e.message);
+        } finally {
+            // CRITICAL: always release the lock, even if _startStream() throws
+            this.isRestarting = false;
+        }
     }
 
     // ─── STT Callbacks ────────────────────────────────────────────────────────
