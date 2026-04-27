@@ -170,12 +170,14 @@ class VoiceProcessor {
                 this._registerConnection();
                 this._notifyPartner("user_joined", { name: this.myName, language: this.myLanguage });
 
-                // Pre-warm STT
-                setTimeout(() => { if (!this.isStreaming) this._startStream(); }, 100);
+                // Start STT stream via _restartStream so isRestarting flag is properly managed
+                setTimeout(() => { if (!this.isStreaming && !this.isRestarting) this._restartStream(); }, 100);
                 // Pre-warm Translation + TTS APIs
                 this._warmUp();
-                // Start silence-based flush checker (150ms polling like reference)
+                // Start silence-based flush checker (150ms polling)
                 this._startSilenceChecker();
+                // Health monitor (logs stream state every 10s for debugging)
+                this._startHealthMonitor();
                 break;
 
             case "audio":
@@ -203,12 +205,13 @@ class VoiceProcessor {
     _processAudio(base64Audio) {
         if (!this.myLanguage) return;
         const buffer = Buffer.from(base64Audio, "base64");
+        this._audioChunkCount = (this._audioChunkCount || 0) + 1;
 
         // If stream is not ready, buffer and ensure a restart is queued
-        if (this.isRestarting || !this.isStreaming || !this.recognizeStream) {
+        if (this.isRestarting || this.isStartingStream || !this.isStreaming || !this.recognizeStream) {
             this.audioBuffer.push(buffer);
             if (this.audioBuffer.length > 100) this.audioBuffer.shift();
-            // Trigger restart if nothing is already running
+            // Trigger restart only if truly idle (not already in progress)
             if (!this.isRestarting && !this.isStartingStream) {
                 this._restartStream();
             }
@@ -225,6 +228,7 @@ class VoiceProcessor {
         // Write audio to live stream
         try {
             this.recognizeStream.write(buffer);
+            this._audioWriteCount = (this._audioWriteCount || 0) + 1;
         } catch (e) {
             console.error("Stream write error:", e.message);
             this._restartStream();
@@ -371,6 +375,32 @@ class VoiceProcessor {
                 this._flushUtterance("silence");
             }
         }, 150);
+    }
+
+    // ─── Health Monitor ───────────────────────────────────────────────────────
+    _startHealthMonitor() {
+        if (this._healthInterval) clearInterval(this._healthInterval);
+        this._healthInterval = setInterval(() => {
+            const state = this.isRestarting ? "RESTARTING"
+                : this.isStartingStream    ? "STARTING"
+                : this.isStreaming         ? "STREAMING"
+                : "DEAD";
+            console.log(
+                `[HEALTH ${this.userType}|${this.myLanguage}] ` +
+                `stream=${state} ` +
+                `audioIn=${this._audioChunkCount||0}/10s ` +
+                `audioOut=${this._audioWriteCount||0}/10s ` +
+                `buf=${this.audioBuffer.length} ` +
+                `utterance="${this.currentUtterance.slice(0,30)}"`
+            );
+            // Auto-recover dead stream
+            if (state === "DEAD" && (this._audioChunkCount||0) > 0) {
+                console.warn(`\u26a0\ufe0f [${this.userType}] Stream DEAD but receiving audio \u2014 force restart`);
+                this._restartStream();
+            }
+            this._audioChunkCount = 0;
+            this._audioWriteCount = 0;
+        }, 10000);
     }
 
     // ─── Core: Delta Flush (from reference) ──────────────────────────────────
@@ -569,6 +599,10 @@ class VoiceProcessor {
         if (this.silenceChecker) {
             clearInterval(this.silenceChecker);
             this.silenceChecker = null;
+        }
+        if (this._healthInterval) {
+            clearInterval(this._healthInterval);
+            this._healthInterval = null;
         }
 
         // Flush any remaining utterance
