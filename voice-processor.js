@@ -204,43 +204,30 @@ class VoiceProcessor {
         if (!this.myLanguage) return;
         const buffer = Buffer.from(base64Audio, "base64");
 
-        // Buffer during ANY transition phase (restarting OR starting)
-        if (this.isRestarting || this.isStartingStream) {
-            if (!this._restartStartedAt) this._restartStartedAt = Date.now();
-            // Safety: force-clear if stuck >5s
-            if (Date.now() - this._restartStartedAt > 5000) {
-                console.warn("⚠️ Stream transition stuck — force-clearing");
-                this.isRestarting = false;
-                this.isStartingStream = false;
-                this._restartStartedAt = 0;
-            } else {
-                this.audioBuffer.push(buffer);
-                if (this.audioBuffer.length > 100) this.audioBuffer.shift();
-                return;
+        // If stream is not ready, buffer and ensure a restart is queued
+        if (this.isRestarting || !this.isStreaming || !this.recognizeStream) {
+            this.audioBuffer.push(buffer);
+            if (this.audioBuffer.length > 100) this.audioBuffer.shift();
+            // Trigger restart if nothing is already running
+            if (!this.isRestarting && !this.isStartingStream) {
+                this._restartStream();
             }
-        } else {
-            this._restartStartedAt = 0;
-        }
-
-        if (!this.isStreaming) {
-            this._startStream();
             return;
         }
 
-        // Safety restart (Google 305s limit)
+        // Safety restart at 4-minute Google hard limit
         if (Date.now() - this.streamCreatedAt > 240000) {
             console.log("🔄 Safety restart (4 min limit)");
             this._restartStream();
             return;
         }
 
-        if (this.recognizeStream && this.isStreaming) {
-            try {
-                this.recognizeStream.write(buffer);
-            } catch (e) {
-                console.error("Stream write error:", e.message);
-                this._restartStream();
-            }
+        // Write audio to live stream
+        try {
+            this.recognizeStream.write(buffer);
+        } catch (e) {
+            console.error("Stream write error:", e.message);
+            this._restartStream();
         }
     }
 
