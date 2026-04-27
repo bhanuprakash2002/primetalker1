@@ -220,18 +220,27 @@ class VoiceProcessor {
         if (!response.results?.[0]) return;
 
         const result = response.results[0];
-        const transcript = result.alternatives?.[0]?.transcript?.trim();
-        if (!transcript) return;
+        const rawTranscript = result.alternatives?.[0]?.transcript?.trim();
+        if (!rawTranscript) return;
 
         const isFinal = result.isFinal;
 
+        // Strip already-processed sentence prefix from cumulative STT results.
+        // Google STT returns growing cumulative text within one session:
+        //   "Hello" → "Hello how are you" → "Hello how are you I am fine"
+        // After sentence 1 ("Hello how are you") is finalized, sentence 2's STT
+        // result still contains sentence 1 as a prefix. Strip it so only NEW
+        // words are accumulated.
+        let transcript = rawTranscript;
+        if (this.lastSentence && transcript.startsWith(this.lastSentence)) {
+            transcript = transcript.slice(this.lastSentence.length).trim();
+        }
+
+        if (!transcript) return; // nothing new to add
+
         if (isFinal) {
-            // ACCUMULATE final results into the sentence
-            if (this.sentence) {
-                this.sentence += " " + transcript;
-            } else {
-                this.sentence = transcript;
-            }
+            // Accumulate final results into the sentence
+            this.sentence = this.sentence ? this.sentence + " " + transcript : transcript;
             this.lastInterim = ""; // Clear interim since we got final
             console.log(`📝 Final: "${this.sentence}"`);
         } else {
