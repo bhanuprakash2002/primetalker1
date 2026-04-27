@@ -124,6 +124,14 @@ class VoiceProcessor {
             return;
         }
 
+        // Schedule idle shutdown: if no audio for 25s, end the stream to avoid 408 timeouts
+        if (this._idleTimer) clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => {
+            if (this.isStreaming) {
+                this._stopStream();
+            }
+        }, 25000);
+
         // Send audio to Google
         if (this.recognizeStream) {
             try {
@@ -160,9 +168,9 @@ class VoiceProcessor {
                 .on("end", () => {
                     this.isStreaming = false;
                     this.recognizeStream = null;
-                    // Only restart if audio received in last 30s (prevent idle spam)
+                    // Only restart if audio received in last 20s (prevent idle 408s)
                     const idleMs = Date.now() - this.lastAudioTime;
-                    if (this.myLanguage && this.ws?.readyState === 1 && idleMs < 30000) {
+                    if (this.myLanguage && this.ws?.readyState === 1 && idleMs < 20000) {
                         this._startStream();
                     }
                 });
@@ -235,10 +243,15 @@ class VoiceProcessor {
 
     _handleSTTError(err) {
         const msg = err.message || "";
-        if (msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11) {
-            // Normal timeout - just restart silently
-        } else {
-            console.error("❌ STT Error:", msg);
+        const isExpectedTimeout =
+            msg.includes("Audio Timeout") ||
+            msg.includes("OUT_OF_RANGE") ||
+            msg.includes("408") ||
+            msg.includes("Request Timeout") ||
+            err.code === 11;
+
+        if (!isExpectedTimeout) {
+            console.error("❌ STT Error:", err.code, msg);
         }
 
         this.isStreaming = false;
@@ -569,6 +582,12 @@ class VoiceProcessor {
         if (this.sentenceTimer) {
             clearTimeout(this.sentenceTimer);
             this.sentenceTimer = null;
+        }
+
+        // Clear idle timer
+        if (this._idleTimer) {
+            clearTimeout(this._idleTimer);
+            this._idleTimer = null;
         }
 
         // Process any remaining sentence
