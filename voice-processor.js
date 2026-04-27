@@ -148,6 +148,10 @@ class VoiceProcessor {
         // TTS serial queue for this speaker (prevents overlap)
         this.ttsQueue = makeSerialQueue();
 
+        // Duplicate prevention
+        this.lastFlushTime = 0;      // timestamp of last flush sent
+        this.lastFlushedText = "";   // exact text of last flush sent
+
         // Bind
         this._onSTTData  = this._onSTTData.bind(this);
         this._onSTTError = this._onSTTError.bind(this);
@@ -233,8 +237,10 @@ class VoiceProcessor {
         this.isStartingStream = true;
 
         // Clear utterance state for new stream — prevents bleeding
+        // NOTE: Do NOT reset lastCommittedFullText here.
+        // It must persist across restarts so the delta guard still works
+        // and prevents duplicate sends after a stream restart.
         this.currentUtterance = "";
-        this.lastCommittedFullText = "";
         this.lastSpeechTime = Date.now();
 
         const langCode  = getSttLangCode(this.myLanguage);
@@ -371,35 +377,49 @@ class VoiceProcessor {
         let fullText = this.currentUtterance.trim();
         if (!fullText) return;
 
-        // Safety: drop suspiciously long jumps (>120 chars, >8 words) - from reference
+        // Safety: drop suspiciously long jumps (>120 chars, >8 words)
         if (fullText.length > 120 && fullText.split(" ").length > 8) {
-            console.log(`⚠️ Dropped suspicious long utterance: "${fullText.substring(0, 50)}..."`);
+            console.log(`⚠️ Dropped long utterance: "${fullText.substring(0, 50)}..."`);
             this.currentUtterance = "";
             return;
         }
 
-        // Extract DELTA: only the new words not in last committed text
+        // Extract delta: only new words not in last committed text
         let deltaText = fullText;
         if (this.lastCommittedFullText && fullText.startsWith(this.lastCommittedFullText)) {
             deltaText = fullText.slice(this.lastCommittedFullText.length).trim();
         }
 
-        // Nothing new
         if (!deltaText) {
             this.currentUtterance = "";
             return;
         }
 
+        // ── DUPLICATE GUARD ──────────────────────────────────────────────────
+        // Prevent the same text being sent twice (silence flush + isFinal race)
+        const now = Date.now();
+        const normalize = (t) => t.toLowerCase().replace(/[^\w\u0900-\u097F\u0C00-\u0C7F]/g, "").trim();
+        if (
+            normalize(deltaText) === normalize(this.lastFlushedText) &&
+            now - this.lastFlushTime < 2000
+        ) {
+            console.log(`🚫 Duplicate suppressed: "${deltaText}"`);
+            this.currentUtterance = "";
+            return;
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         console.log(`\n🔵 [${this.myLanguage}] FLUSH (${reason}): "${deltaText}"\n`);
 
-        // Update committed baseline
         this.lastCommittedFullText = fullText;
+        this.lastFlushedText = deltaText;
+        this.lastFlushTime = now;
         this.currentUtterance = "";
 
-        // Force STT context reset in background (don't block translation)
+        // Reset context in background
         setImmediate(() => this._restartStream());
 
-        // Send to translation pipeline via serial TTS queue
+        // Send to translation pipeline
         this.ttsQueue(() => this._translateAndSend(deltaText));
     }
 
