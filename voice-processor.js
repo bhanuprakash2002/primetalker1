@@ -1,127 +1,160 @@
-// voice-processor.js - Robust Live Translation with Sentence Accumulation
+// voice-processor.js - Clean Bidirectional Real-Time Translation
 const speech = require("@google-cloud/speech");
 const textToSpeech = require("@google-cloud/text-to-speech");
 const { Translate } = require("@google-cloud/translate").v2;
 
-// Support for cloud deployment: read credentials from env var
+// ─── Google Cloud Credentials ────────────────────────────────────────────────
 let googleCredentials = null;
 if (process.env.GOOGLE_CREDENTIALS) {
-    googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    try { googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS); }
+    catch (e) { console.error("Bad GOOGLE_CREDENTIALS env var:", e.message); }
+}
+const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
+
+// ─── Shared Singleton Clients (one per server process) ────────────────────────
+const sharedSpeechClient    = new speech.SpeechClient(clientConfig);
+const sharedTtsClient       = new textToSpeech.TextToSpeechClient(clientConfig);
+const sharedTranslateClient = new Translate(clientConfig);
+
+// ─── Language Helpers ─────────────────────────────────────────────────────────
+const STT_LANG_MAP = {
+    en: "en-IN",                                          // Indian-accented English
+    hi: "hi-IN", te: "te-IN", ta: "ta-IN", kn: "kn-IN",
+    ml: "ml-IN", mr: "mr-IN", gu: "gu-IN", pa: "pa-IN",
+    bn: "bn-IN", ur: "ur-IN",
+    es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
+    it: "it-IT", nl: "nl-NL", pl: "pl-PL", ru: "ru-RU",
+    zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR",
+    ar: "ar-XA", tr: "tr-TR", he: "he-IL",
+};
+
+const TTS_VOICE_MAP = {
+    en:  { languageCode: "en-US", name: "en-US-Neural2-J" },
+    hi:  { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
+    te:  { languageCode: "te-IN", name: "te-IN-Standard-A" },
+    ta:  { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
+    kn:  { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
+    ml:  { languageCode: "ml-IN", name: "ml-IN-Standard-A" },
+    mr:  { languageCode: "mr-IN", name: "mr-IN-Standard-A" },
+    gu:  { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
+    pa:  { languageCode: "pa-IN", name: "pa-IN-Standard-A" },
+    bn:  { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
+    es:  { languageCode: "es-ES", name: "es-ES-Neural2-A" },
+    fr:  { languageCode: "fr-FR", name: "fr-FR-Neural2-A" },
+    de:  { languageCode: "de-DE", name: "de-DE-Neural2-A" },
+    pt:  { languageCode: "pt-BR", name: "pt-BR-Neural2-A" },
+    it:  { languageCode: "it-IT", name: "it-IT-Neural2-A" },
+    ru:  { languageCode: "ru-RU", name: "ru-RU-Standard-A" },
+    zh:  { languageCode: "cmn-CN", name: "cmn-CN-Standard-A" },
+    ja:  { languageCode: "ja-JP", name: "ja-JP-Neural2-B" },
+    ko:  { languageCode: "ko-KR", name: "ko-KR-Neural2-A" },
+    ar:  { languageCode: "ar-XA", name: "ar-XA-Standard-A" },
+    tr:  { languageCode: "tr-TR", name: "tr-TR-Neural2-A" },
+    nl:  { languageCode: "nl-NL", name: "nl-NL-Neural2-A" },
+    pl:  { languageCode: "pl-PL", name: "pl-PL-Neural2-A" },
+    vi:  { languageCode: "vi-VN", name: "vi-VN-Neural2-A" },
+    th:  { languageCode: "th-TH", name: "th-TH-Neural2-C" },
+};
+
+function getSttLangCode(lang) {
+    const base = (lang || "en").split("-")[0].toLowerCase();
+    return STT_LANG_MAP[base] || "en-IN";
 }
 
-// ✅ SINGLETON Google Cloud clients (shared across all connections)
-// Saves ~200-500ms per connection by avoiding re-authentication
-const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
-const sharedSpeechClient = new speech.SpeechClient(clientConfig);
-const sharedTtsClient = new textToSpeech.TextToSpeechClient(clientConfig);
-const sharedTranslateClient = new Translate(googleCredentials ? { credentials: googleCredentials } : {});
+function getTtsVoice(lang) {
+    const base = (lang || "en").split("-")[0].toLowerCase();
+    return TTS_VOICE_MAP[base] || { languageCode: getSttLangCode(lang), ssmlGender: "NEUTRAL" };
+}
 
-// Indian language codes for faster timeout
-const INDIAN_LANGS = ['te', 'hi', 'ta', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ur'];
+function getLangBase(lang) {
+    return (lang || "en").split("-")[0].toLowerCase();
+}
 
+// TTS_SAMPLE_RATE - must be consistent everywhere
+const TTS_SAMPLE_RATE = 24000;
+
+// ─── WAV Builder ──────────────────────────────────────────────────────────────
+function buildWav(pcmBuffer, sampleRate) {
+    const h = Buffer.alloc(44);
+    h.write("RIFF", 0);
+    h.writeUInt32LE(36 + pcmBuffer.length, 4);
+    h.write("WAVE", 8);
+    h.write("fmt ", 12);
+    h.writeUInt32LE(16, 16);
+    h.writeUInt16LE(1, 20);   // PCM
+    h.writeUInt16LE(1, 22);   // mono
+    h.writeUInt32LE(sampleRate, 24);
+    h.writeUInt32LE(sampleRate * 2, 28); // byteRate
+    h.writeUInt16LE(2, 32);   // blockAlign
+    h.writeUInt16LE(16, 34);  // bitsPerSample
+    h.write("data", 36);
+    h.writeUInt32LE(pcmBuffer.length, 40);
+    return Buffer.concat([h, pcmBuffer]);
+}
+
+// ─── Main Class ───────────────────────────────────────────────────────────────
 class VoiceProcessor {
     constructor(websocket, activeSessions) {
-        this.ws = websocket;
+        this.ws             = websocket;
         this.activeSessions = activeSessions;
 
-        // ✅ Use shared singleton Google Cloud clients
-        this.speechClient = sharedSpeechClient;
-        this.ttsClient = sharedTtsClient;
+        // Shared Google clients
+        this.speechClient    = sharedSpeechClient;
+        this.ttsClient       = sharedTtsClient;
         this.translateClient = sharedTranslateClient;
 
-        // User info
-        this.roomId = null;
-        this.userType = null;
-        this.myLanguage = null;
-        this.myName = null;
+        // Room / user identity
+        this.roomId      = null;
+        this.userType    = null;
+        this.myLanguage  = null;
+        this.myName      = null;
 
-        // STT state - SIMPLIFIED
-        this.recognizeStream = null;
-        this.isStreaming = false;
-        this.streamCreatedAt = 0;
+        // STT stream state
+        this.recognizeStream    = null;
+        this.isStreaming        = false;
+        this.isStartingStream   = false;
+        this.isRestarting       = false;
+        this.streamCreatedAt    = 0;
+        this.audioBuffer        = [];   // audio queued during restart
 
-        // Sentence building - THE KEY FIX
-        this.sentence = "";           // Current accumulated sentence (from finals)
-        this.lastInterim = "";        // Backup: latest interim result
-        this.lastSentence = "";       // Last processed sentence
-        this.streamHistory = "";      // Total history of the current stream
-        this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 1000; // 🚀 Balanced timeout to prevent both cutting and accumulation
+        // Sentence state - cleared on every restart
+        this.pendingText        = "";   // text from current stream only
+        this.lastInterim        = "";
+        this.sentenceTimer      = null;
 
-        // Processing Queue
-        this.sentenceQueue = [];
-        this.isProcessingQueue = false;
-        this.isFinalizing = false; // Flag to prevent double-finalization during restarts
-        this.isRestarting = false; // Flag for atomic restarts
-        this.isStartingStream = false; // Flag to prevent multiple parallel starts
-        this.audioBuffer = [];    // Buffer for audio during restarts
-        this.lastFinalizeTime = 0; // Timestamp of last finalization to prevent echoes
+        // Finalization gate
+        this.isFinalizing       = false;
+        this.lastFinalizeTime   = 0;
 
-        // Bind handlers
-        this._handleSTTData = this._handleSTTData.bind(this);
-        this._handleSTTError = this._handleSTTError.bind(this);
+        // Bind STT callbacks
+        this._onSTTData  = this._onSTTData.bind(this);
+        this._onSTTError = this._onSTTError.bind(this);
     }
 
+    // ─── Public: incoming WebSocket messages ──────────────────────────────────
     async handleMessage(msg) {
         switch (msg.event) {
             case "connected":
-                this.roomId = msg.roomId;
-                this.userType = msg.userType;
+                this.roomId     = msg.roomId;
+                this.userType   = msg.userType;
                 this.myLanguage = msg.myLanguage;
-                this.myName = msg.myName || "User";
-                console.log(`✅ ${this.userType} connected in ${this.roomId} (${this.myLanguage})`);
+                this.myName     = msg.myName || "User";
+                console.log(`✅ [${this.userType}] connected – room:${this.roomId} lang:${this.myLanguage}`);
                 this._registerConnection();
                 this._notifyPartner("user_joined", { name: this.myName, language: this.myLanguage });
-
-                // ✅ Dynamic sentence timeout: faster for Indian languages
-                const baseLang = (this.myLanguage || 'en').split('-')[0];
-                if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
-                    console.log(`⚡ Indian language detected (${baseLang}), using balanced timeout: ${this.SENTENCE_TIMEOUT}ms`);
-                }
-
-                // Pre-warm STT stream after a short delay to reduce cold-start latency
-                setTimeout(() => {
-                    if (!this.isStreaming) {
-                        console.log(`🔥 Pre-warming STT stream for ${this.myLanguage}...`);
-                        this._startStream();
-                    }
-                }, 100);
-
-                // ✅ Pre-warm Translate + TTS clients (first call has extra latency)
-                setTimeout(async () => {
-                    try {
-                        const warmStart = Date.now();
-                        const targetLang = this.myLanguage || "en-US";
-                        await Promise.all([
-                            this.translateClient.translate("hello", { to: "en" }),
-                            this.ttsClient.synthesizeSpeech({
-                                input: { text: "." },
-                                voice: { languageCode: "en-US" },
-                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000 }
-                            }),
-                            // Also warm up the current user's language
-                            this.ttsClient.synthesizeSpeech({
-                                input: { text: "." },
-                                voice: { languageCode: targetLang.split("-")[0] === "en" ? "es-ES" : targetLang },
-                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24000 }
-                            })
-                        ]);
-                        console.log(`🔥 Translate + TTS warmed up in ${Date.now() - warmStart}ms`);
-                    } catch (e) { /* ignore warm-up errors */ }
-                }, 200);
+                // Pre-warm stream & API clients
+                setTimeout(() => { if (!this.isStreaming) this._startStream(); }, 100);
+                this._warmUpClients();
                 break;
+
             case "audio":
-                await this._processAudio(msg.audio);
+                this._processAudio(msg.audio);
                 break;
 
-            // WebRTC Video Signaling - relay to partner
             case "video-offer":
-                console.log(`📹 Relaying video offer from ${this.userType}`);
                 this._notifyPartner("video-offer", { sdp: msg.sdp });
                 break;
             case "video-answer":
-                console.log(`📹 Relaying video answer from ${this.userType}`);
                 this._notifyPartner("video-answer", { sdp: msg.sdp });
                 break;
             case "ice-candidate":
@@ -135,54 +168,38 @@ class VoiceProcessor {
         }
     }
 
-    _registerConnection() {
-        const session = this.activeSessions.get(this.roomId);
-        if (!session) return;
-        if (this.userType === "caller") session.callerConnection = this;
-        else session.receiverConnection = this;
-    }
+    // ─── Private: audio pipeline ──────────────────────────────────────────────
 
-    async _processAudio(base64Audio) {
+    _processAudio(base64Audio) {
         if (!this.myLanguage) return;
-
         const buffer = Buffer.from(base64Audio, "base64");
 
-        // If we are in the middle of a restart, buffer the audio so it's not lost
+        // Queue during restart
         if (this.isRestarting) {
             this.audioBuffer.push(buffer);
-            if (this.audioBuffer.length > 50) this.audioBuffer.shift(); // Safety cap
+            if (this.audioBuffer.length > 60) this.audioBuffer.shift();
             return;
         }
 
-        // Ensure stream is running (with lock)
+        // Start stream if needed
         if (!this.isStreaming && !this.isStartingStream) {
             this._startStream();
         }
 
-        // Check if we need to restart (Google has ~305s limit)
-        const streamAge = Date.now() - this.streamCreatedAt;
-        if (streamAge > 240000) { // Restart every 4 minutes for safety
-            console.log("🔄 Restarting stream (age limit reached)");
-            // Finalize whatever we have before restarting so it's not lost
-            if (this.sentence || this.lastInterim) {
-                this._finalizeSentence();
-            }
-            await this._restartStream();
-            // Buffer this chunk since we just triggered a restart
-            this.audioBuffer.push(buffer);
-            if (this.audioBuffer.length > 50) this.audioBuffer.shift();
+        // Periodic safety restart (Google's 305s hard limit)
+        if (Date.now() - this.streamCreatedAt > 240000) {
+            console.log("🔄 Safety restart (4 min limit)");
+            this._doRestart();
             return;
         }
 
-        // Send ALL audio to Google (let it decide what's speech)
-        if (this.recognizeStream) {
+        // Write audio
+        if (this.recognizeStream && this.isStreaming) {
             try {
                 this.recognizeStream.write(buffer);
             } catch (e) {
-                console.error("Write error:", e.message);
-                await this._restartStream();
-                this.audioBuffer.push(buffer); // Save for replay
-                if (this.audioBuffer.length > 50) this.audioBuffer.shift();
+                console.error("Stream write error:", e.message);
+                this._doRestart();
             }
         }
     }
@@ -191,435 +208,313 @@ class VoiceProcessor {
         if (this.isStreaming || this.isStartingStream) return;
         this.isStartingStream = true;
 
-        const langCode = this._getLangCode(this.myLanguage);
+        // ⚠️ CRITICAL: Clear pending text from ANY previous stream.
+        // This prevents old words from bleeding into new sentences.
+        this.pendingText  = "";
+        this.lastInterim  = "";
+
+        const langCode = getSttLangCode(this.myLanguage);
+        const isEnglish = getLangBase(this.myLanguage) === "en";
 
         try {
             this.recognizeStream = this.speechClient
                 .streamingRecognize({
                     config: {
-                        encoding: "LINEAR16",
-                        sampleRateHertz: 16000,
-                        languageCode: langCode,
+                        encoding:                  "LINEAR16",
+                        sampleRateHertz:           16000,
+                        languageCode:              langCode,
                         enableAutomaticPunctuation: true,
-                        useEnhanced: true,
-                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "default",
-                        speechContexts: [{
-                            phrases: ["did you eat", "how are you", "what are you doing", "namaste", "bagunnara"],
-                            boost: 20.0
-                        }]
+                        useEnhanced:               true,
+                        // latest_long for English, default for Indian scripts
+                        model: isEnglish ? "latest_long" : "default",
                     },
                     interimResults: true,
-                    singleUtterance: false
+                    singleUtterance: false,
                 })
-                .on("data", this._handleSTTData)
-                .on("error", this._handleSTTError)
-                .on("end", () => {
-                    this.isStreaming = false;
+                .on("data",  this._onSTTData)
+                .on("error", this._onSTTError)
+                .on("end",   () => {
+                    this.isStreaming     = false;
                     this.recognizeStream = null;
+                    console.log(`🔴 Stream ended: ${langCode}`);
                 });
 
-            this.isStreaming = true;
+            this.isStreaming      = true;
             this.isStartingStream = false;
-            this.streamCreatedAt = Date.now();
-            this.lastInterim = ""; 
+            this.streamCreatedAt  = Date.now();
             console.log(`🎤 Stream started: ${langCode}`);
 
-            // ✅ REPLAY BUFFER: Send any audio that was caught during the restart
+            // Replay buffered audio
             if (this.audioBuffer.length > 0) {
-                console.log(`📡 Replaying ${this.audioBuffer.length} buffered chunks`);
-                this.audioBuffer.forEach(chunk => {
-                    if (this.recognizeStream) this.recognizeStream.write(chunk);
-                });
-                this.audioBuffer = [];
+                const chunks = this.audioBuffer.splice(0);
+                chunks.forEach(c => { if (this.recognizeStream) this.recognizeStream.write(c); });
+                console.log(`📡 Replayed ${chunks.length} buffered chunks`);
             }
         } catch (e) {
-            console.error("Failed to start stream:", e.message);
-            this.isStreaming = false;
+            console.error("Failed to start STT stream:", e.message);
+            this.isStreaming      = false;
             this.isStartingStream = false;
         }
     }
 
-    async _stopStream() {
+    _stopStream() {
         if (this.recognizeStream) {
-            try { this.recognizeStream.end(); } catch (e) { }
+            try { this.recognizeStream.end(); } catch (_) {}
+            this.recognizeStream = null;
         }
-        this.recognizeStream = null;
         this.isStreaming = false;
     }
 
-    async _restartStream() {
+    async _doRestart() {
         if (this.isRestarting) return;
         this.isRestarting = true;
-        
-        await this._stopStream();
-        // We DON'T clear this.sentence here anymore, 
-        // it should have been finalized or we want to keep it.
-        this.lastInterim = "";   
+        this._clearTimer();
+        this._stopStream();
         await this._startStream();
-        
         this.isRestarting = false;
     }
 
-    _handleSTTData(response) {
-        if (!response.results?.[0]) return;
+    // ─── STT callbacks ────────────────────────────────────────────────────────
 
-        const result = response.results[0];
+    _onSTTData(response) {
+        const result = response.results?.[0];
+        if (!result) return;
+
         const transcript = result.alternatives?.[0]?.transcript?.trim();
         if (!transcript) return;
 
-        const isFinal = result.isFinal;
-
-        if (isFinal) {
-            this.sentence = transcript;
-            this.lastInterim = ""; 
-            console.log(`📝 Final Result: "${this.sentence}"`);
-            this._finalizeSentence(); // 🚀 Restore immediate finalization for certainty
+        if (result.isFinal) {
+            // Replace the pending text with ONLY this final result (no accumulation)
+            this.pendingText = transcript;
+            this.lastInterim = "";
+            console.log(`📝 [${this.myLanguage}] FINAL: "${transcript}"`);
+            // Finalize immediately and restart stream to clear Google's memory
+            this._finalize("final");
         } else {
-            // 🚀 Interim duplicate guard
+            // Show interim but don't accumulate it into pendingText yet
             if (this.lastInterim === transcript) return;
-
-            // Save interim as backup (in case stream times out)
-            const preview = this.sentence ? this.sentence + " " + transcript : transcript;
-            this.lastInterim = preview; 
-            console.log(`⏳ Speaking: "${preview}"`);
-            this._sendToUI({ event: "transcript_interim", text: preview });
-
-            // 🚀 Do NOT finalize on interim punctuation anymore (it's too aggressive)
-            // The timer and isFinal will handle it more reliably.
+            this.lastInterim = transcript;
+            this._sendToUI({ event: "transcript_interim", text: transcript });
+            // Reset the silence timer
+            this._resetTimer();
         }
-
-
-
-        // Reset timer - user is still speaking
-        this._resetSentenceTimer();
     }
 
-    _handleSTTError(err) {
+    _onSTTError(err) {
         const msg = err.message || "";
-        if (msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11) {
-            console.log("⏰ Stream timeout (normal)");
-        } else {
-            console.error("❌ STT Error:", msg);
-        }
+        const isNormal = msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11;
+        if (!isNormal) console.error(`❌ STT Error [${this.myLanguage}]:`, msg);
+        else console.log(`⏰ Stream timeout (normal) [${this.myLanguage}]`);
 
         this.isStreaming = false;
         if (this.recognizeStream) {
-            try { this.recognizeStream.end(); } catch (e) { }
+            try { this.recognizeStream.end(); } catch (_) {}
             this.recognizeStream = null;
         }
 
-        // Use interim as backup if no finals accumulated
-        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
-            console.log(`🔄 Using interim backup: "${this.lastInterim}"`);
-            this.sentence = this.lastInterim;
+        // Use best available text
+        const best = this.pendingText || this.lastInterim;
+        if (best) {
+            this.pendingText = best;
+            this._finalize("error-recovery");
         }
-
-        // Process any accumulated sentence
-        if (this.sentence && this.sentence !== this.lastSentence) {
-            this._finalizeSentence();
-        }
-
-        this.lastInterim = ""; // Clear interim after use
     }
 
-    _resetSentenceTimer() {
-        if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
-        
-        let timeout = this.SENTENCE_TIMEOUT;
-        const langCode = this._getLangCode(this.myLanguage);
-        
-        // 🚀 Language-specific timeouts (Phone Call Refined)
-        if (langCode.startsWith("en-")) {
-            timeout = 1000; // 1.0s
-        } else {
-            const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
-            if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 1000; // 1.0s
-            }
-        }
+    // ─── Timer ────────────────────────────────────────────────────────────────
 
-        this.sentenceTimer = setTimeout(() => {
-            this._finalizeSentence();
-        }, timeout);
+    _resetTimer() {
+        this._clearTimer();
+        // 1s silence timeout for all languages
+        this.sentenceTimer = setTimeout(() => this._finalize("timer"), 1000);
     }
 
-    _finalizeSentence() {
-        if (this.isFinalizing) return;
-
-        // 🛑 STRONG ECHO GUARD: 300ms
-        const now = Date.now();
-        if (now - this.lastFinalizeTime < 300) {
-            return;
-        }
-
-        this.isFinalizing = true;
-        this.lastFinalizeTime = now;
-
+    _clearTimer() {
         if (this.sentenceTimer) {
             clearTimeout(this.sentenceTimer);
             this.sentenceTimer = null;
         }
+    }
 
-        // Use interim backup if no final result
-        if (!this.sentence && this.lastInterim && this.lastInterim !== this.lastSentence) {
-            this.sentence = this.lastInterim;
-        }
+    // ─── Finalize a sentence and send for translation ─────────────────────────
 
-        // 🚀 Strong duplicate filter (Normalize before compare)
-        const clean = (text) => text.toLowerCase().replace(/[^\w\s\u0C00-\u0C7F\u0900-\u097F]/g, "").trim();
+    _finalize(reason) {
+        // Guard: only one finalization at a time
+        if (this.isFinalizing) return;
 
-        if (!this.sentence || clean(this.sentence) === clean(this.lastSentence)) {
-            this.isFinalizing = false;
+        // Minimum gap between finalizations (prevents echo of same sentence)
+        if (Date.now() - this.lastFinalizeTime < 400) {
             return;
         }
 
-        const finalSentence = this.sentence.trim();
-        console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
+        const text = (this.pendingText || this.lastInterim || "").trim();
+        if (!text) return;
 
-        this.lastSentence = finalSentence;
-        this.sentence = "";
-        this.lastInterim = "";
-        this.audioBuffer = []; // 🚀 FLUSH BUFFER so finished speech isn't re-processed
+        this.isFinalizing     = true;
+        this.lastFinalizeTime = Date.now();
+        this._clearTimer();
 
-        this.sentenceQueue.push(finalSentence);
-        this._processQueue();
+        // Capture and immediately clear state so next stream starts fresh
+        const finalText   = text;
+        this.pendingText  = "";
+        this.lastInterim  = "";
 
-        // ✅ MANDATORY RESTART: Clear Google's memory for the next sentence
-        // This ensures previous words don't get combined with new ones.
-        this._restartStream().then(() => {
-            this.isFinalizing = false;
-        }).catch(() => {
+        console.log(`\n🔵 [${this.myLanguage}] SENTENCE (${reason}): "${finalText}"\n`);
+
+        // Send to translation pipeline (non-blocking)
+        this._translateAndSend(finalText).catch(e => {
+            console.error("Pipeline error:", e.message);
+        });
+
+        // Restart stream to clear Google's context — do it in background
+        this._doRestart().finally(() => {
             this.isFinalizing = false;
         });
     }
 
-    async _processQueue() {
-        if (this.isProcessingQueue || this.sentenceQueue.length === 0) return;
-        this.isProcessingQueue = true;
+    // ─── Translation + TTS Pipeline ───────────────────────────────────────────
 
-        while (this.sentenceQueue.length > 0) {
-            const text = this.sentenceQueue.shift();
-            if (!text) continue;
+    async _translateAndSend(text) {
+        const session = this.activeSessions.get(this.roomId);
+        if (!session) return;
 
-            const start = Date.now();
+        const partner = this.userType === "caller"
+            ? session.receiverConnection
+            : session.callerConnection;
 
-            try {
-                const session = this.activeSessions.get(this.roomId);
-                if (!session) continue;
-
-                const partner = this.userType === "caller"
-                    ? session.receiverConnection
-                    : session.callerConnection;
-
-                if (!partner?.myLanguage) {
-                    console.log("⚠️ Partner not connected");
-                    continue;
-                }
-
-                // 1. Translate
-                const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
-                const translateTime = Date.now() - start;
-                console.log(`🌐 [${translateTime}ms] TRANSLATE: "${text}" → "${translated}"`);
-
-                // 2. IMMEDIATELY send text to both users (don't wait for TTS!)
-                const data = {
-                    event: "translation",
-                    originalText: text,
-                    translatedText: translated,
-                    fromUser: this.userType,
-                    fromLanguage: this.myLanguage,
-                    toLanguage: partner.myLanguage
-                };
-                this._sendToUI(data);
-                partner._sendToUI(data);
-
-                // 3. Generate TTS in background (Non-blocking)
-                const ttsStart = Date.now();
-                this._tts(translated, partner.myLanguage).then(audio => {
-                    const ttsTime = Date.now() - ttsStart;
-
-                    // 4. Send audio
-                    if (audio && partner.ws?.readyState === 1) {
-                        const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
-                        const wav = isRiff ? audio : this._toWav(audio, 24000);
-
-                        partner.ws.send(JSON.stringify({
-                            event: "audio_playback",
-                            audio: wav.toString("base64"),
-                            format: "wav"
-                        }));
-                        console.log(`🔊 [${ttsTime}ms] TTS sent to partner. Total Pipeline: ${Date.now() - start}ms`);
-                    }
-                }).catch(e => {
-                    console.error("TTS background error:", e.message);
-                });
-            } catch (e) {
-                console.error("Translation error:", e.message);
-            }
+        if (!partner?.myLanguage) {
+            console.log("⚠️ Partner not connected, dropping sentence");
+            return;
         }
 
-        this.isProcessingQueue = false;
+        const t0 = Date.now();
+
+        // 1. Translate
+        const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
+        console.log(`🌐 [${Date.now() - t0}ms] "${text}" → "${translated}"`);
+
+        // 2. Send text immediately to BOTH sides
+        const payload = {
+            event:          "translation",
+            originalText:   text,
+            translatedText: translated,
+            fromUser:       this.userType,
+            fromLanguage:   this.myLanguage,
+            toLanguage:     partner.myLanguage,
+        };
+        this._sendToUI(payload);
+        partner._sendToUI(payload);
+
+        // 3. Generate TTS and send audio (background, non-blocking)
+        const ttsT0 = Date.now();
+        this._tts(translated, partner.myLanguage).then(audio => {
+            if (!audio) return;
+            if (partner.ws?.readyState !== 1) return;
+
+            // Check if Google already returned a WAV container
+            const hasRiffHeader = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
+            const wav = hasRiffHeader ? audio : buildWav(audio, TTS_SAMPLE_RATE);
+
+            partner.ws.send(JSON.stringify({
+                event:  "audio_playback",
+                audio:  wav.toString("base64"),
+                format: "wav",
+            }));
+            console.log(`🔊 TTS [${Date.now() - ttsT0}ms] → partner (${partner.myLanguage}). Pipeline total: ${Date.now() - t0}ms`);
+        }).catch(e => console.error("TTS send error:", e.message));
     }
 
-    async _translate(text, from, to) {
-        const fromLang = (from || "en").split("-")[0];
-        const toLang = (to || "en").split("-")[0];
-        if (fromLang === toLang) return text;
+    // ─── Google API Helpers ───────────────────────────────────────────────────
 
+    async _translate(text, from, to) {
+        const fromBase = getLangBase(from);
+        const toBase   = getLangBase(to);
+        if (fromBase === toBase) return text;
         try {
-            const [result] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
+            const [result] = await this.translateClient.translate(text, { from: fromBase, to: toBase });
             return result;
         } catch (e) {
-            console.error("Translate error:", e.message);
-            return text;
+            console.error("Translate API error:", e.message);
+            return text; // fallback: show original
         }
     }
 
     async _tts(text, lang) {
-        // Comprehensive language support with Neural2 where available
-        const voices = {
-            // Major World Languages
-            en: { languageCode: "en-US", name: "en-US-Neural2-J" },
-            es: { languageCode: "es-ES", name: "es-ES-Neural2-A" },
-            fr: { languageCode: "fr-FR", name: "fr-FR-Neural2-A" },
-            de: { languageCode: "de-DE", name: "de-DE-Neural2-A" },
-            pt: { languageCode: "pt-BR", name: "pt-BR-Neural2-A" },
-            it: { languageCode: "it-IT", name: "it-IT-Neural2-A" },
-            ru: { languageCode: "ru-RU", name: "ru-RU-Standard-A" },
-
-            // Asian Languages
-            zh: { languageCode: "cmn-CN", name: "cmn-CN-Standard-A" },
-            ja: { languageCode: "ja-JP", name: "ja-JP-Neural2-B" },
-            ko: { languageCode: "ko-KR", name: "ko-KR-Neural2-A" },
-            vi: { languageCode: "vi-VN", name: "vi-VN-Neural2-A" },
-            th: { languageCode: "th-TH", name: "th-TH-Neural2-C" },
-            id: { languageCode: "id-ID", name: "id-ID-Standard-A" },
-            ms: { languageCode: "ms-MY", name: "ms-MY-Standard-A" },
-            fil: { languageCode: "fil-PH", name: "fil-PH-Neural2-A" },
-
-            // Indian Languages
-            te: { languageCode: "te-IN", name: "te-IN-Standard-A" }, 
-            hi: { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
-            ta: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
-            bn: { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
-            gu: { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
-            kn: { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
-            ml: { languageCode: "ml-IN", name: "ml-IN-Standard-A" },
-            mr: { languageCode: "mr-IN", name: "mr-IN-Standard-A" },
-            pa: { languageCode: "pa-IN", name: "pa-IN-Standard-A" },
-
-            // Middle Eastern Languages
-            ar: { languageCode: "ar-XA", name: "ar-XA-Standard-A" },
-            he: { languageCode: "he-IL", name: "he-IL-Standard-A" },
-            tr: { languageCode: "tr-TR", name: "tr-TR-Neural2-A" },
-            fa: { languageCode: "fa-IR", name: "fa-IR-Standard-A" },
-
-            // European Languages
-            nl: { languageCode: "nl-NL", name: "nl-NL-Neural2-A" },
-            pl: { languageCode: "pl-PL", name: "pl-PL-Neural2-A" },
-            sv: { languageCode: "sv-SE", name: "sv-SE-Neural2-A" },
-            da: { languageCode: "da-DK", name: "da-DK-Neural2-D" },
-            no: { languageCode: "nb-NO", name: "nb-NO-Neural2-A" },
-            fi: { languageCode: "fi-FI", name: "fi-FI-Neural2-A" },
-            el: { languageCode: "el-GR", name: "el-GR-Neural2-A" },
-            cs: { languageCode: "cs-CZ", name: "cs-CZ-Standard-A" },
-            ro: { languageCode: "ro-RO", name: "ro-RO-Standard-A" },
-            hu: { languageCode: "hu-HU", name: "hu-HU-Standard-A" },
-            uk: { languageCode: "uk-UA", name: "uk-UA-Standard-A" },
-
-            // Other
-            af: { languageCode: "af-ZA", name: "af-ZA-Standard-A" }
-        };
-
-        const base = (lang || "en").split("-")[0];
-        const voice = voices[base] || { languageCode: lang, ssmlGender: "NEUTRAL" };
-
+        const voice = getTtsVoice(lang);
         try {
-            const [response] = await this.ttsClient.synthesizeSpeech({
-                input: { text },
+            const [res] = await this.ttsClient.synthesizeSpeech({
+                input:       { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
+                audioConfig: {
+                    audioEncoding:  "LINEAR16",
+                    sampleRateHertz: TTS_SAMPLE_RATE,
+                    speakingRate:   1.1,
+                },
             });
-            return response.audioContent;
+            return res.audioContent;
         } catch (e) {
-            console.error("TTS error:", e.message);
+            console.error(`TTS error [${lang}]:`, e.message);
             return null;
         }
     }
 
-    _getLangCode(lang) {
-        const map = {
-            // English - Using en-IN for better local accent support
-            en: "en-IN",
-            // ✅ All Indian languages (previously missing: bn, gu, kn, ml, mr, pa, ur)
-            hi: "hi-IN", te: "te-IN", ta: "ta-IN",
-            bn: "bn-IN", gu: "gu-IN", kn: "kn-IN",
-            ml: "ml-IN", mr: "mr-IN", pa: "pa-IN", ur: "ur-IN",
-            // European
-            es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
-            it: "it-IT", nl: "nl-NL", pl: "pl-PL", ru: "ru-RU",
-            // Asian
-            zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR",
-            // Middle Eastern
-            ar: "ar-XA", tr: "tr-TR", he: "he-IL"
-        };
-        return map[(lang || "en").split("-")[0]] || "en-US";
+    async _warmUpClients() {
+        setTimeout(async () => {
+            try {
+                await Promise.all([
+                    this.translateClient.translate("hello", { to: "en" }),
+                    this.ttsClient.synthesizeSpeech({
+                        input:       { text: "." },
+                        voice:       { languageCode: "en-US" },
+                        audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: TTS_SAMPLE_RATE },
+                    }),
+                ]);
+                console.log("🔥 API clients warmed up");
+            } catch (_) { /* ignore warm-up errors */ }
+        }, 300);
     }
 
-    _toWav(pcm, rate) {
-        const h = Buffer.alloc(44);
-        h.write("RIFF", 0);
-        h.writeUInt32LE(36 + pcm.length, 4);
-        h.write("WAVE", 8);
-        h.write("fmt ", 12);
-        h.writeUInt32LE(16, 16);
-        h.writeUInt16LE(1, 20);
-        h.writeUInt16LE(1, 22);
-        h.writeUInt32LE(rate, 24);
-        h.writeUInt32LE(rate * 2, 28);
-        h.writeUInt16LE(2, 32);
-        h.writeUInt16LE(16, 34);
-        h.write("data", 36);
-        h.writeUInt32LE(pcm.length, 40);
-        return Buffer.concat([h, pcm]);
+    // ─── Room / Connection Helpers ────────────────────────────────────────────
+
+    _registerConnection() {
+        const session = this.activeSessions.get(this.roomId);
+        if (!session) return;
+        if (this.userType === "caller") session.callerConnection   = this;
+        else                            session.receiverConnection = this;
     }
 
     _sendToUI(data) {
         try {
-            if (this.ws?.readyState === 1) {
-                this.ws.send(JSON.stringify(data));
-            }
-        } catch (e) { }
+            if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(data));
+        } catch (_) {}
     }
 
     _notifyPartner(event, data) {
         const session = this.activeSessions.get(this.roomId);
         if (!session) return;
-        const partner = this.userType === "caller" ? session.receiverConnection : session.callerConnection;
+        const partner = this.userType === "caller"
+            ? session.receiverConnection
+            : session.callerConnection;
         if (partner?.ws?.readyState === 1) {
             partner.ws.send(JSON.stringify({ event, ...data }));
         }
     }
 
+    // ─── Cleanup ──────────────────────────────────────────────────────────────
+
     async cleanup() {
-        if (this.sentenceTimer) {
-            clearTimeout(this.sentenceTimer);
-            this.sentenceTimer = null;
+        this._clearTimer();
+        const leftover = (this.pendingText || this.lastInterim).trim();
+        if (leftover) {
+            this.pendingText = leftover;
+            this._finalize("cleanup");
         }
-
-        // Process any remaining sentence
-        if (this.sentence && this.sentence !== this.lastSentence) {
-            this._finalizeSentence();
-        }
-
-        await this._stopStream();
+        this._stopStream();
 
         const session = this.activeSessions.get(this.roomId);
         if (session) {
-            if (session.callerConnection === this) session.callerConnection = null;
+            if (session.callerConnection   === this) session.callerConnection   = null;
             if (session.receiverConnection === this) session.receiverConnection = null;
         }
-
         this._notifyPartner("user_left", {});
         console.log(`🧹 Cleanup: ${this.userType} in ${this.roomId}`);
     }
