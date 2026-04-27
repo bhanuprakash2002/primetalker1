@@ -247,10 +247,8 @@ class VoiceProcessor {
         this.isStartingStream = true;
 
         // Clear utterance state for new stream — prevents bleeding
-        // NOTE: Do NOT reset lastCommittedFullText here.
-        // It must persist across restarts so the delta guard still works
-        // and prevents duplicate sends after a stream restart.
         this.currentUtterance = "";
+        this.lastCommittedFullText = ""; // safe to reset: text-based duplicate guard prevents re-sends
         this.lastSpeechTime = Date.now();
 
         const langCode  = getSttLangCode(this.myLanguage);
@@ -455,11 +453,11 @@ class VoiceProcessor {
 
         const t0 = Date.now();
 
-        // 1. Translate
+        // 1. Translate (with 6s timeout so a hung API call never blocks the queue)
         const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
         console.log(`🌐 [${Date.now() - t0}ms] "${text}" → "${translated}"`);
 
-        // 2. Send text to BOTH UIs immediately
+        // 2. Send text to BOTH UIs immediately — don't wait for TTS
         const payload = {
             event:          "translation",
             originalText:   text,
@@ -471,10 +469,10 @@ class VoiceProcessor {
         this._sendToUI(payload);
         partner._sendToUI(payload);
 
-        // 3. Generate + send TTS audio to partner
-        const ttsT0 = Date.now();
-        const audio = await this._tts(translated, partner.myLanguage);
-        if (audio && partner.ws?.readyState === 1) {
+        // 3. Generate TTS in BACKGROUND — does NOT block the translation queue
+        //    This means the next sentence can translate immediately even if TTS is slow
+        this._tts(translated, partner.myLanguage).then(audio => {
+            if (!audio || partner.ws?.readyState !== 1) return;
             const hasRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
             const wav = hasRiff ? audio : buildWav(audio, TTS_SAMPLE_RATE);
             partner.ws.send(JSON.stringify({
@@ -482,36 +480,52 @@ class VoiceProcessor {
                 audio:  wav.toString("base64"),
                 format: "wav",
             }));
-            console.log(`🔊 TTS [${Date.now() - ttsT0}ms] total pipeline: ${Date.now() - t0}ms`);
-        }
+            console.log(`🔊 TTS done [${Date.now() - t0}ms total]`);
+        }).catch(e => console.error("TTS background error:", e.message));
     }
 
     // ─── Google API Helpers ───────────────────────────────────────────────────
+    // timeout helper
+    _withTimeout(promise, ms, label) {
+        return Promise.race([
+            promise,
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+            )
+        ]);
+    }
+
     async _translate(text, from, to) {
         const fromBase = getLangBase(from);
         const toBase   = getLangBase(to);
         if (fromBase === toBase) return text;
         try {
-            const [result] = await this.translateClient.translate(text, { from: fromBase, to: toBase });
+            const [result] = await this._withTimeout(
+                this.translateClient.translate(text, { from: fromBase, to: toBase }),
+                6000, "Translate"
+            );
             return result;
         } catch (e) {
             console.error("Translate error:", e.message);
-            return text;
+            return text; // fallback: show original text
         }
     }
 
     async _tts(text, lang) {
         const voice = getTtsVoice(lang);
         try {
-            const [res] = await this.ttsClient.synthesizeSpeech({
-                input:       { text },
-                voice,
-                audioConfig: {
-                    audioEncoding:   "LINEAR16",
-                    sampleRateHertz: TTS_SAMPLE_RATE,
-                    speakingRate:    1.1,
-                },
-            });
+            const [res] = await this._withTimeout(
+                this.ttsClient.synthesizeSpeech({
+                    input:       { text },
+                    voice,
+                    audioConfig: {
+                        audioEncoding:   "LINEAR16",
+                        sampleRateHertz: TTS_SAMPLE_RATE,
+                        speakingRate:    1.1,
+                    },
+                }),
+                10000, "TTS" // 10s timeout
+            );
             return res.audioContent;
         } catch (e) {
             console.error(`TTS error [${lang}]:`, e.message);
