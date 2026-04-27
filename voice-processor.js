@@ -46,7 +46,7 @@ class VoiceProcessor {
         this.lastSentence = "";       // Last processed sentence
         this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 1200; // 🚀 Increased base timeout to prevent cutting
+        this.SENTENCE_TIMEOUT = 800;  // 🚀 Reduced for better meeting responsiveness
 
         // Processing Queue
         this.sentenceQueue = [];
@@ -76,7 +76,7 @@ class VoiceProcessor {
                 // ✅ Dynamic sentence timeout: faster for Indian languages
                 const baseLang = (this.myLanguage || 'en').split('-')[0];
                 if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
+                    this.SENTENCE_TIMEOUT = 700; // 0.7s for Indian languages
                     console.log(`⚡ Indian language detected (${baseLang}), using timeout: ${this.SENTENCE_TIMEOUT}ms`);
                 }
 
@@ -202,7 +202,7 @@ class VoiceProcessor {
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         useEnhanced: true,
-                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "latest_short",
+                        model: (this.myLanguage || "en").startsWith("en") ? "latest_long" : "default",
                         speechContexts: [{
                             phrases: ["did you eat", "how are you", "what are you doing", "namaste", "bagunnara"],
                             boost: 20.0
@@ -330,11 +330,11 @@ class VoiceProcessor {
         
         // 🚀 Language-specific timeouts (Phone Call Refined)
         if (langCode.startsWith("en-")) {
-            timeout = 1500; // 1.5s (Standard for conversational English)
+            timeout = 800; // 0.8s
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 1200; // 1.2s for Indian languages
+                timeout = 700; // 0.7s
             }
         }
 
@@ -381,12 +381,7 @@ class VoiceProcessor {
         this.lastInterim = "";
         this.audioBuffer = []; // 🚀 FLUSH BUFFER so finished speech isn't re-processed
 
-        // 🚀 Smart Queue Deduplication
-        const exists = this.sentenceQueue.some(s => clean(s) === clean(finalSentence));
-        if (!exists) {
-            this.sentenceQueue.push(finalSentence);
-        }
-        
+        this.sentenceQueue.push(finalSentence);
         this._processQueue();
 
         // No more mandatory restart on every sentence!
@@ -433,27 +428,27 @@ class VoiceProcessor {
                 };
                 this._sendToUI(data);
                 partner._sendToUI(data);
-                console.log(`⚡ [${Date.now() - start}ms] Text sent to UI`);
 
-                // 3. Generate TTS in background
+                // 3. Generate TTS in background (Non-blocking)
                 const ttsStart = Date.now();
-                const audio = await this._tts(translated, partner.myLanguage);
-                const ttsTime = Date.now() - ttsStart;
+                this._tts(translated, partner.myLanguage).then(audio => {
+                    const ttsTime = Date.now() - ttsStart;
 
-                // 4. Send audio
-                if (audio && partner.ws?.readyState === 1) {
-                    // Google TTS LINEAR16 sometimes returns a WAV header already.
-                    // If it does, don't prepend another one to avoid corrupted audio starts.
-                    const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
-                    const wav = isRiff ? audio : this._toWav(audio, 24000);
+                    // 4. Send audio
+                    if (audio && partner.ws?.readyState === 1) {
+                        const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
+                        const wav = isRiff ? audio : this._toWav(audio, 24000);
 
-                    partner.ws.send(JSON.stringify({
-                        event: "audio_playback",
-                        audio: wav.toString("base64"),
-                        format: "wav"
-                    }));
-                    console.log(`🔊 [${ttsTime}ms] TTS generated and sent. Total Pipeline: ${Date.now() - start}ms`);
-                }
+                        partner.ws.send(JSON.stringify({
+                            event: "audio_playback",
+                            audio: wav.toString("base64"),
+                            format: "wav"
+                        }));
+                        console.log(`🔊 [${ttsTime}ms] TTS sent to partner. Total Pipeline: ${Date.now() - start}ms`);
+                    }
+                }).catch(e => {
+                    console.error("TTS background error:", e.message);
+                });
             } catch (e) {
                 console.error("Translation error:", e.message);
             }
