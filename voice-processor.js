@@ -144,7 +144,7 @@ class VoiceProcessor {
                 .streamingRecognize({
                     config: {
                         encoding: "LINEAR16",
-                        sampleRateHertz: 48000,
+                        sampleRateHertz: 16000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         model: model,
