@@ -46,7 +46,7 @@ class VoiceProcessor {
         this.lastSentence = "";       // Last processed sentence
         this.streamHistory = "";      // Total history of the current stream
         this.sentenceTimer = null;    // Timer to finalize sentence
-        this.SENTENCE_TIMEOUT = 800;  // 🚀 Reduced for better meeting responsiveness
+        this.SENTENCE_TIMEOUT = 1000; // 🚀 Balanced timeout to prevent both cutting and accumulation
 
         // Processing Queue
         this.sentenceQueue = [];
@@ -76,8 +76,8 @@ class VoiceProcessor {
                 // ✅ Dynamic sentence timeout: faster for Indian languages
                 const baseLang = (this.myLanguage || 'en').split('-')[0];
                 if (INDIAN_LANGS.includes(baseLang)) {
-                    this.SENTENCE_TIMEOUT = 700; // 0.7s for Indian languages
-                    console.log(`⚡ Indian language detected (${baseLang}), using timeout: ${this.SENTENCE_TIMEOUT}ms`);
+                    this.SENTENCE_TIMEOUT = 1000; // 1.0s for Indian languages
+                    console.log(`⚡ Indian language detected (${baseLang}), using balanced timeout: ${this.SENTENCE_TIMEOUT}ms`);
                 }
 
                 // Pre-warm STT stream after a short delay to reduce cold-start latency
@@ -330,11 +330,11 @@ class VoiceProcessor {
         
         // 🚀 Language-specific timeouts (Phone Call Refined)
         if (langCode.startsWith("en-")) {
-            timeout = 800; // 0.8s
+            timeout = 1000; // 1.0s
         } else {
             const INDIAN_LANGS = ["hi-IN", "te-IN", "kn-IN", "ml-IN", "ta-IN", "gu-IN", "mr-IN", "pa-IN"];
             if (INDIAN_LANGS.includes(langCode)) {
-                timeout = 700; // 0.7s
+                timeout = 1000; // 1.0s
             }
         }
 
@@ -384,9 +384,13 @@ class VoiceProcessor {
         this.sentenceQueue.push(finalSentence);
         this._processQueue();
 
-        // No more mandatory restart on every sentence!
-        // We only restart when the 50s limit is reached or on errors.
-        this.isFinalizing = false;
+        // ✅ MANDATORY RESTART: Clear Google's memory for the next sentence
+        // This ensures previous words don't get combined with new ones.
+        this._restartStream().then(() => {
+            this.isFinalizing = false;
+        }).catch(() => {
+            this.isFinalizing = false;
+        });
     }
 
     async _processQueue() {
