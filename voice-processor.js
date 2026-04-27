@@ -246,9 +246,9 @@ class VoiceProcessor {
         if (this.isStreaming || this.isStartingStream) return;
         this.isStartingStream = true;
 
-        // Clear utterance state for new stream — prevents bleeding
+        // Clear utterance state for new stream
         this.currentUtterance = "";
-        this.lastCommittedFullText = ""; // safe to reset: text-based duplicate guard prevents re-sends
+        this.lastCommittedFullText = ""; // reset only at stream start (beginning of call / 4-min restart)
         this.lastSpeechTime = Date.now();
 
         const langCode  = getSttLangCode(this.myLanguage);
@@ -391,8 +391,8 @@ class VoiceProcessor {
         let fullText = this.currentUtterance.trim();
         if (!fullText) return;
 
-        // Safety: drop suspiciously long jumps (>120 chars, >8 words)
-        if (fullText.length > 120 && fullText.split(" ").length > 8) {
+        // Safety: drop extremely long jumps (>200 chars, >15 words) — raised limit for continuous stream
+        if (fullText.length > 200 && fullText.split(" ").length > 15) {
             console.log(`⚠️ Dropped long utterance: "${fullText.substring(0, 50)}..."`);
             this.currentUtterance = "";
             return;
@@ -430,8 +430,9 @@ class VoiceProcessor {
         this.lastFlushTime = now;
         this.currentUtterance = "";
 
-        // Reset context in background
-        setImmediate(() => this._restartStream());
+        // NO stream restart here — stream runs CONTINUOUSLY for the full call.
+        // Delta extraction handles Google's text accumulation cleanly.
+        // Stream only restarts at the 4-minute Google hard limit or on error.
 
         // Send to translation pipeline
         this.ttsQueue(() => this._translateAndSend(deltaText));
