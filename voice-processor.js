@@ -102,22 +102,24 @@ class VoiceProcessor {
         // If currently starting, buffer the audio so we don't lose the first words
         if (this.isStartingStream) {
             this.audioBuffer.push(buffer);
-            if (this.audioBuffer.length > 100) this.audioBuffer.shift(); // Keep last 2-3 seconds
+            if (this.audioBuffer.length > 100) this.audioBuffer.shift();
             return;
         }
 
-        // Ensure stream is running
+        // Ensure stream is running (continuous - always restart if down)
         if (!this.isStreaming) {
             this._startStream();
             this.audioBuffer.push(buffer);
             return;
         }
 
-        // Check if we need to restart (Google has ~60s limit)
+        // Proactively restart before Google's 60s limit (seamless)
         const streamAge = Date.now() - this.streamCreatedAt;
-        if (streamAge > 55000) {
-            console.log("🔄 Restarting stream (age limit)");
+        if (streamAge > 50000) {
+            console.log("🔄 Seamless stream restart (age limit)");
             this._restartStream();
+            this.audioBuffer.push(buffer);
+            return;
         }
 
         // Send audio to Google
@@ -127,6 +129,7 @@ class VoiceProcessor {
             } catch (e) {
                 console.error("Write error:", e.message);
                 this._restartStream();
+                this.audioBuffer.push(buffer);
             }
         }
     }
@@ -155,12 +158,16 @@ class VoiceProcessor {
                 .on("end", () => {
                     this.isStreaming = false;
                     this.recognizeStream = null;
+                    // Continuous: immediately restart on end
+                    if (this.myLanguage && this.ws?.readyState === 1) {
+                        this._startStream();
+                    }
                 });
 
             this.isStreaming = true;
             this.isStartingStream = false;
             this.streamCreatedAt = Date.now();
-            console.log(`🎤 Stream started: ${langCode} (model: latest_long)`);
+            console.log(`🎤 Stream started: ${langCode}`);
 
             // Replay any audio that arrived while we were starting
             if (this.audioBuffer.length > 0) {
@@ -187,8 +194,10 @@ class VoiceProcessor {
 
     async _restartStream() {
         const savedSentence = this.sentence;
+        const savedInterim = this.lastInterim;
         await this._stopStream();
         this.sentence = savedSentence;
+        this.lastInterim = savedInterim;
         await this._startStream();
     }
 
@@ -209,12 +218,11 @@ class VoiceProcessor {
                 this.sentence = transcript;
             }
             this.lastInterim = ""; // Clear interim since we got final
-            console.log(`📝 Accumulated: "${this.sentence}"`);
+            console.log(`📝 Final: "${this.sentence}"`);
         } else {
-            // Save interim as backup (in case stream times out)
+            // Save interim as backup (critical for regional languages)
             const preview = this.sentence ? this.sentence + " " + transcript : transcript;
-            this.lastInterim = preview; // SAVE FOR BACKUP
-            console.log(`⏳ Speaking: "${preview}"`);
+            this.lastInterim = preview;
             this._sendToUI({ event: "transcript_interim", text: preview });
         }
 
@@ -225,7 +233,7 @@ class VoiceProcessor {
     _handleSTTError(err) {
         const msg = err.message || "";
         if (msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11) {
-            console.log("⏰ Stream timeout (normal)");
+            // Normal timeout - just restart silently
         } else {
             console.error("❌ STT Error:", msg);
         }
@@ -244,7 +252,12 @@ class VoiceProcessor {
             this._finalizeSentence();
         }
 
-        this.lastInterim = ""; // Clear interim after use
+        this.lastInterim = "";
+
+        // Continuous: immediately restart stream
+        if (this.myLanguage && this.ws?.readyState === 1) {
+            this._startStream();
+        }
     }
 
     _resetSentenceTimer() {
@@ -281,14 +294,32 @@ class VoiceProcessor {
         this.sentence = "";
         this.lastInterim = "";
 
-        // Translate and speak
-        this._translateAndSpeak(finalSentence);
+        // Translate and speak (queued, never dropped)
+        this._queueTranslation(finalSentence);
+    }
+
+    _queueTranslation(text) {
+        if (!this._translationQueue) this._translationQueue = [];
+        this._translationQueue.push(text);
+        if (!this._isTranslating) {
+            this._processTranslationQueue();
+        }
+    }
+
+    async _processTranslationQueue() {
+        if (this._isTranslating) return;
+        this._isTranslating = true;
+
+        while (this._translationQueue && this._translationQueue.length > 0) {
+            const text = this._translationQueue.shift();
+            await this._translateAndSpeak(text);
+        }
+
+        this._isTranslating = false;
     }
 
     async _translateAndSpeak(text) {
-        if (this.isProcessing || !text) return;
-        this.isProcessing = true;
-
+        if (!text) return;
         const start = Date.now();
 
         try {
@@ -336,11 +367,9 @@ class VoiceProcessor {
             }
 
             const totalMs = Date.now() - start;
-            console.log(`⏱️ Translate: ${translateMs}ms | TTS: ${ttsMs}ms | Total: ${totalMs}ms | "${text}" → "${translated}"`);
+            console.log(`⏱️ ${translateMs}ms+${ttsMs}ms=${totalMs}ms | "${text}" → "${translated}"`);
         } catch (e) {
             console.error("Translation error:", e.message);
-        } finally {
-            this.isProcessing = false;
         }
     }
 

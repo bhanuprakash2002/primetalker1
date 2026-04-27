@@ -55,8 +55,7 @@ app.post("/api/video-token", (req, res) => {
         const twilioApiSecret = process.env.TWILIO_API_SECRET;
 
         if (!twilioAccountSid || !twilioApiKeySid || !twilioApiSecret) {
-            console.error("Missing Twilio credentials");
-            return res.status(500).json({ error: "Twilio not configured" });
+            return res.status(501).json({ error: "Twilio not configured - video disabled" });
         }
 
         const token = new AccessToken(
