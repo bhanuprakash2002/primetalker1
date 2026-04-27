@@ -64,13 +64,13 @@ class VoiceProcessor {
                 console.log(`✅ ${this.userType} connected in ${this.roomId} (${this.myLanguage})`);
                 this._registerConnection();
                 this._notifyPartner("user_joined", { name: this.myName, language: this.myLanguage });
-                
+
                 // Pre-warm STT stream IMMEDIATELY
                 if (!this.isStreaming && !this.isStartingStream) {
                     console.log(`🔥 Pre-warming STT stream for ${this.myLanguage}...`);
                     this._startStream().then(() => {
                         if (this.recognizeStream) {
-                            const silence = Buffer.alloc(9600); // 100ms at 48kHz
+                            const silence = Buffer.alloc(3200); // 100ms at 16kHz mono 16-bit
                             try { this.recognizeStream.write(silence); } catch (e) { }
                             console.log(`🔥 Warm-up audio sent for ${this.myLanguage}`);
                         }
@@ -115,7 +115,7 @@ class VoiceProcessor {
 
         // Check if we need to restart (Google has ~60s limit)
         const streamAge = Date.now() - this.streamCreatedAt;
-        if (streamAge > 55000) { 
+        if (streamAge > 55000) {
             console.log("🔄 Restarting stream (age limit)");
             this._restartStream();
         }
@@ -136,8 +136,6 @@ class VoiceProcessor {
         this.isStartingStream = true;
 
         const langCode = this._getLangCode(this.myLanguage);
-        const indianCodes = ["hi-IN", "te-IN", "ta-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "pa-IN"];
-        const model = indianCodes.includes(langCode) ? "latest_short" : "latest_long";
 
         try {
             this.recognizeStream = this.speechClient
@@ -147,8 +145,7 @@ class VoiceProcessor {
                         sampleRateHertz: 16000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
-                        model: model,
-                        useEnhanced: true
+                        model: "latest_long"
                     },
                     interimResults: true,
                     singleUtterance: false
@@ -163,13 +160,13 @@ class VoiceProcessor {
             this.isStreaming = true;
             this.isStartingStream = false;
             this.streamCreatedAt = Date.now();
-            console.log(`🎤 Stream started: ${langCode} (model: ${model})`);
+            console.log(`🎤 Stream started: ${langCode} (model: latest_long)`);
 
             // Replay any audio that arrived while we were starting
             if (this.audioBuffer.length > 0) {
                 const chunks = this.audioBuffer.splice(0);
                 chunks.forEach(chunk => {
-                    try { this.recognizeStream.write(chunk); } catch (e) {}
+                    try { this.recognizeStream.write(chunk); } catch (e) { }
                 });
                 console.log(`📡 Replayed ${chunks.length} buffered chunks`);
             }
@@ -468,9 +465,26 @@ class VoiceProcessor {
 
     _getLangCode(lang) {
         const map = {
-            en: "en-US", hi: "hi-IN", te: "te-IN", ta: "ta-IN",
-            es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
-            ru: "ru-RU", zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR", ar: "ar-XA"
+            // Major World Languages
+            en: "en-US", es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
+            it: "it-IT", ru: "ru-RU", nl: "nl-NL", pl: "pl-PL",
+
+            // Asian Languages
+            zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR", vi: "vi-VN",
+            th: "th-TH", id: "id-ID", ms: "ms-MY", fil: "fil-PH",
+
+            // Indian Languages (ALL)
+            hi: "hi-IN", te: "te-IN", ta: "ta-IN", bn: "bn-IN",
+            gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", mr: "mr-IN",
+            pa: "pa-IN", ur: "ur-IN",
+
+            // Middle Eastern
+            ar: "ar-XA", he: "he-IL", tr: "tr-TR", fa: "fa-IR",
+
+            // European
+            sv: "sv-SE", da: "da-DK", no: "nb-NO", fi: "fi-FI",
+            el: "el-GR", cs: "cs-CZ", ro: "ro-RO", hu: "hu-HU",
+            uk: "uk-UA", af: "af-ZA"
         };
         return map[(lang || "en").split("-")[0]] || "en-US";
     }
