@@ -1,9 +1,7 @@
 // server.js - Express + WebSocket Server for Live Translation
-if (process.env.NODE_ENV !== "production") {
-    require("dotenv").config();
-}
+require("dotenv").config();
 
-// Force immediate log output
+// Force immediate log output (fixes Render log buffering)
 if (process.stdout._handle) process.stdout._handle.setBlocking(true);
 if (process.stderr._handle) process.stderr._handle.setBlocking(true);
 const express = require("express");
@@ -16,18 +14,20 @@ const { AccessToken } = require('twilio').jwt;
 const { VideoGrant } = AccessToken;
 
 const app = express();
-app.use(express.json());
-
-// CORS - Allow cross-origin requests
+// CORS - Allow cross-origin requests (MUST BE BEFORE express.json)
 app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin || "*";
+    res.header("Access-Control-Allow-Origin", origin);
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    res.header("Access-Control-Allow-Credentials", "true");
     if (req.method === "OPTIONS") {
         return res.sendStatus(200);
     }
     next();
 });
+
+app.use(express.json());
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -55,7 +55,8 @@ app.post("/api/video-token", (req, res) => {
         const twilioApiSecret = process.env.TWILIO_API_SECRET;
 
         if (!twilioAccountSid || !twilioApiKeySid || !twilioApiSecret) {
-            return res.status(501).json({ error: "Twilio not configured - video disabled" });
+            console.error("Missing Twilio credentials");
+            return res.status(500).json({ error: "Twilio not configured" });
         }
 
         const token = new AccessToken(
@@ -76,20 +77,11 @@ app.post("/api/video-token", (req, res) => {
     }
 });
 
-app.get("/api/debug-env", (req, res) => {
-    res.json({
-        TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID ? process.env.TWILIO_ACCOUNT_SID.substring(0,4) + "..." : "missing",
-        TWILIO_API_KEY_SID: process.env.TWILIO_API_KEY_SID ? process.env.TWILIO_API_KEY_SID.substring(0,4) + "..." : "missing",
-        TWILIO_API_SECRET: process.env.TWILIO_API_SECRET ? "set (hidden)" : "missing",
-        NODE_ENV: process.env.NODE_ENV || "missing"
-    });
-});
-
 // Create a new room
 app.post("/create-room", (req, res) => {
     try {
         const { creatorLanguage, creatorName } = req.body;
-        const roomId = uuidv4().substring(0, 8);
+        const roomId = uuidv4().substring(0, 6); // Shortened to 6 characters
 
         activeSessions.set(roomId, {
             creatorLanguage,
@@ -222,14 +214,14 @@ wss.on("connection", (ws, req) => {
 });
 
 // Start server
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
 
 // Handle WebSocket upgrade for /audio-stream path
 server.on("upgrade", (req, socket, head) => {
-    if (req.url.startsWith("/audio-stream")) {
+    if (req.url === "/audio-stream") {
         wss.handleUpgrade(req, socket, head, (ws) => {
             wss.emit("connection", ws, req);
         });
