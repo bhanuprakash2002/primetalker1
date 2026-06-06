@@ -76,6 +76,15 @@ app.post("/api/video-token", (req, res) => {
     }
 });
 
+app.get("/api/debug-env", (req, res) => {
+    res.json({
+        TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID ? process.env.TWILIO_ACCOUNT_SID.substring(0,4) + "..." : "missing",
+        TWILIO_API_KEY_SID: process.env.TWILIO_API_KEY_SID ? process.env.TWILIO_API_KEY_SID.substring(0,4) + "..." : "missing",
+        TWILIO_API_SECRET: process.env.TWILIO_API_SECRET ? "set (hidden)" : "missing",
+        NODE_ENV: process.env.NODE_ENV || "missing"
+    });
+});
+
 // Create a new room
 app.post("/create-room", (req, res) => {
     try {
