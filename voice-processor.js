@@ -2,7 +2,6 @@
 const speech = require("@google-cloud/speech");
 const textToSpeech = require("@google-cloud/text-to-speech");
 const { Translate } = require("@google-cloud/translate").v2;
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // Support for cloud deployment: read credentials from env var
 let googleCredentials = null;
@@ -10,27 +9,16 @@ if (process.env.GOOGLE_CREDENTIALS) {
     googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 }
 
-// ✅ SINGLETON Google Cloud clients (shared across all connections)
-// Saves ~200-500ms per connection by avoiding re-authentication
-const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
-const sharedSpeechClient = new speech.SpeechClient(clientConfig);
-const sharedTtsClient = new textToSpeech.TextToSpeechClient(clientConfig);
-const sharedTranslateClient = new Translate(clientConfig);
-
-// Removed Gemini API to use faster Google Translate API directly
-
-// Indian language codes for faster timeout
-const INDIAN_LANGS = ['te', 'hi', 'ta', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ur'];
-
 class VoiceProcessor {
     constructor(websocket, activeSessions) {
         this.ws = websocket;
         this.activeSessions = activeSessions;
 
-        // ✅ Use shared singleton Google Cloud clients
-        this.speechClient = sharedSpeechClient;
-        this.ttsClient = sharedTtsClient;
-        this.translateClient = sharedTranslateClient;
+        // Google Cloud clients (use env credentials if available)
+        const clientConfig = googleCredentials ? { credentials: googleCredentials } : {};
+        this.speechClient = new speech.SpeechClient(clientConfig);
+        this.ttsClient = new textToSpeech.TextToSpeechClient(clientConfig);
+        this.translateClient = new Translate(googleCredentials ? { credentials: googleCredentials } : {});
 
         // User info
         this.roomId = null;
@@ -38,14 +26,33 @@ class VoiceProcessor {
         this.myLanguage = null;
         this.myName = null;
 
-        // STT state - SIMPLIFIED
+        // STT state
         this.recognizeStream = null;
         this.isStreaming = false;
+        this.isStartingStream = false; // Prevents multiple parallel start attempts
         this.streamCreatedAt = 0;
+        this.lastAudioTime = 0;        // Track last audio received (for idle detection)
+        this.audioBuffer = [];         // Buffers audio while connection is opening
 
-        // Processing Queue
-        this.sentenceQueue = [];
-        this.isProcessingQueue = false;
+        // Sentence building - THE KEY FIX
+        this.sentence = "";           // Current accumulated sentence (from finals)
+        this.lastInterim = "";        // Backup: latest interim result
+        this.lastSentence = "";       // Last processed sentence
+        this.sentenceTimer = null;    // Timer to finalize sentence
+        this.SENTENCE_TIMEOUT = 1500; // 1.5s of silence = end of sentence
+
+        // Deduplication: track last 5 processed sentences to prevent any repeat
+        this._recentSentences = [];
+        this.MAX_RECENT = 5;
+
+        // Processing lock
+        this.isProcessing = false;
+
+        // Caches for translation & TTS (avoid redundant API calls)
+        this.translationCache = new Map(); // key: "text|from|to" → translated text
+        this.ttsCache = new Map();         // key: "text|lang" → audio buffer
+        this.MAX_TRANSLATION_CACHE = 100;
+        this.MAX_TTS_CACHE = 50;
 
         // Bind handlers
         this._handleSTTData = this._handleSTTData.bind(this);
@@ -63,46 +70,21 @@ class VoiceProcessor {
                 this._registerConnection();
                 this._notifyPartner("user_joined", { name: this.myName, language: this.myLanguage });
 
-                // Pre-warm STT stream after a short delay to reduce cold-start latency
-                setTimeout(() => {
-                    if (!this.isStreaming) {
-                        console.log(`🔥 Pre-warming STT stream for ${this.myLanguage}...`);
-                        this._startStream();
-                    }
-                }, 500);
-
-                // ✅ Pre-warm Translate + TTS clients (first call has extra latency)
-                setTimeout(async () => {
-                    try {
-                        const warmStart = Date.now();
-                        await Promise.all([
-                            this.ttsClient.synthesizeSpeech({
-                                input: { text: "." },
-                                voice: { languageCode: "en-US" },
-                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 16000 }
-                            })
-                        ]);
-                        console.log(`🔥 Translate + TTS warmed up in ${Date.now() - warmStart}ms`);
-                    } catch (e) { /* ignore warm-up errors */ }
-                }, 600);
+                // Pre-warm STT stream IMMEDIATELY
+                if (!this.isStreaming && !this.isStartingStream) {
+                    console.log(`🔥 Pre-warming STT stream for ${this.myLanguage}...`);
+                    this._startStream().then(() => {
+                        if (this.recognizeStream) {
+                            const silence = Buffer.alloc(3200); // 100ms at 16kHz mono 16-bit
+                            try { this.recognizeStream.write(silence); } catch (e) { }
+                            console.log(`🔥 Warm-up audio sent for ${this.myLanguage}`);
+                        }
+                    });
+                }
                 break;
             case "audio":
-                await this._processAudio(msg.audio);
+                this._processAudio(msg.audio);
                 break;
-
-            // WebRTC Video Signaling - relay to partner
-            case "video-offer":
-                console.log(`📹 Relaying video offer from ${this.userType}`);
-                this._notifyPartner("video-offer", { sdp: msg.sdp });
-                break;
-            case "video-answer":
-                console.log(`📹 Relaying video answer from ${this.userType}`);
-                this._notifyPartner("video-answer", { sdp: msg.sdp });
-                break;
-            case "ice-candidate":
-                this._notifyPartner("ice-candidate", { candidate: msg.candidate });
-                break;
-
             case "disconnect":
             case "stop":
                 await this.cleanup();
@@ -120,35 +102,55 @@ class VoiceProcessor {
     async _processAudio(base64Audio) {
         if (!this.myLanguage) return;
 
+        this.lastAudioTime = Date.now(); // Track when we last received audio
         const buffer = Buffer.from(base64Audio, "base64");
 
-        // Ensure stream is running
+        // If currently starting, buffer the audio so we don't lose the first words
+        if (this.isStartingStream) {
+            this.audioBuffer.push(buffer);
+            if (this.audioBuffer.length > 100) this.audioBuffer.shift();
+            return;
+        }
+
+        // Ensure stream is running (continuous - always restart if down)
         if (!this.isStreaming) {
-            await this._startStream();
+            this._startStream();
+            this.audioBuffer.push(buffer);
+            return;
         }
 
-        // Check if we need to restart (Google has ~60s limit)
+        // Proactively restart before Google's 60s limit (seamless)
         const streamAge = Date.now() - this.streamCreatedAt;
-        if (streamAge > 290000) { // Restart every 4.8 minutes for safety
-            console.log("🔄 Restarting stream (age limit)");
-            await this._restartStream();
+        if (streamAge > 50000) {
+            console.log("🔄 Seamless stream restart (age limit)");
+            this._restartStream();
+            this.audioBuffer.push(buffer);
+            return;
         }
 
-        // Send ALL audio to Google (let it decide what's speech)
+        // Schedule idle shutdown: if no audio for 25s, end the stream to avoid 408 timeouts
+        if (this._idleTimer) clearTimeout(this._idleTimer);
+        this._idleTimer = setTimeout(() => {
+            if (this.isStreaming) {
+                this._stopStream();
+            }
+        }, 25000);
+
+        // Send audio to Google
         if (this.recognizeStream) {
             try {
                 this.recognizeStream.write(buffer);
             } catch (e) {
                 console.error("Write error:", e.message);
-                await this._restartStream();
+                this._restartStream();
+                this.audioBuffer.push(buffer);
             }
         }
-
-        // DON'T reset timer here - only reset when we get actual STT results
     }
 
     async _startStream() {
-        if (this.isStreaming) return;
+        if (this.isStreaming || this.isStartingStream) return;
+        this.isStartingStream = true;
 
         const langCode = this._getLangCode(this.myLanguage);
 
@@ -160,25 +162,40 @@ class VoiceProcessor {
                         sampleRateHertz: 16000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
-                        model: "latest_long",
-                        useEnhanced: true
+                        model: "latest_long"
                     },
                     interimResults: true,
-                    singleUtterance: true
+                    singleUtterance: false
                 })
                 .on("data", this._handleSTTData)
                 .on("error", this._handleSTTError)
                 .on("end", () => {
                     this.isStreaming = false;
                     this.recognizeStream = null;
+                    // Only restart if audio received in last 20s (prevent idle 408s)
+                    const idleMs = Date.now() - this.lastAudioTime;
+                    if (this.myLanguage && this.ws?.readyState === 1 && idleMs < 20000) {
+                        this._startStream();
+                    }
                 });
 
             this.isStreaming = true;
+            this.isStartingStream = false;
             this.streamCreatedAt = Date.now();
             console.log(`🎤 Stream started: ${langCode}`);
+
+            // Replay any audio that arrived while we were starting
+            if (this.audioBuffer.length > 0) {
+                const chunks = this.audioBuffer.splice(0);
+                chunks.forEach(chunk => {
+                    try { this.recognizeStream.write(chunk); } catch (e) { }
+                });
+                console.log(`📡 Replayed ${chunks.length} buffered chunks`);
+            }
         } catch (e) {
             console.error("Failed to start stream:", e.message);
             this.isStreaming = false;
+            this.isStartingStream = false;
         }
     }
 
@@ -191,7 +208,11 @@ class VoiceProcessor {
     }
 
     async _restartStream() {
+        // Only save in-progress finals (not interim) — saving interim causes sentences to compound
+        const savedSentence = this.sentence;
         await this._stopStream();
+        this.sentence = savedSentence;
+        // lastInterim is intentionally NOT restored — it resets per sentence
         await this._startStream();
     }
 
@@ -199,120 +220,195 @@ class VoiceProcessor {
         if (!response.results?.[0]) return;
 
         const result = response.results[0];
-        const transcript = result.alternatives?.[0]?.transcript?.trim();
-        if (!transcript) return;
+        const rawTranscript = result.alternatives?.[0]?.transcript?.trim();
+        if (!rawTranscript) return;
 
-        if (result.isFinal) {
-            console.log(`📝 Final: "${transcript}"`);
-            this.sentenceQueue.push(transcript);
-            this._processQueue();
-        } else {
-            console.log(`⏳ Speaking: "${transcript}"`);
-            
-            // Fast interim translation for zero-latency UI
-            let partnerLang = "en";
-            const session = this.activeSessions.get(this.roomId);
-            if (session) {
-                const partner = this.userType === "caller" ? session.receiverConnection : session.callerConnection;
-                if (partner && partner.myLanguage) partnerLang = partner.myLanguage;
-            }
+        const isFinal = result.isFinal;
 
-            const fromLang = (this.myLanguage || "en").split("-")[0];
-            const toLang = (partnerLang || "en").split("-")[0];
-
-            if (fromLang !== toLang) {
-                this.translateClient.translate(transcript, { from: fromLang, to: toLang })
-                    .then(([translatedText]) => {
-                        const data = { event: "transcript_interim", text: translatedText, userType: this.userType, original: transcript };
-                        this._sendToUI(data);
-                        this._notifyPartner("transcript_interim", data);
-                    }).catch(() => {
-                        this._sendToUI({ event: "transcript_interim", text: transcript, userType: this.userType });
-                    });
-            } else {
-                this._sendToUI({ event: "transcript_interim", text: transcript, userType: this.userType });
-            }
+        // Strip already-processed sentence prefix from cumulative STT results.
+        // Google STT returns growing cumulative text within one session:
+        //   "Hello" → "Hello how are you" → "Hello how are you I am fine"
+        // After sentence 1 ("Hello how are you") is finalized, sentence 2's STT
+        // result still contains sentence 1 as a prefix. Strip it so only NEW
+        // words are accumulated.
+        let transcript = rawTranscript;
+        if (this.lastSentence && transcript.startsWith(this.lastSentence)) {
+            transcript = transcript.slice(this.lastSentence.length).trim();
         }
+
+        if (!transcript) return; // nothing new to add
+
+        if (isFinal) {
+            // Accumulate final results into the sentence
+            this.sentence = this.sentence ? this.sentence + " " + transcript : transcript;
+            this.lastInterim = ""; // Clear interim since we got final
+            console.log(`📝 Final: "${this.sentence}"`);
+        } else {
+            // Save interim as backup (critical for regional languages)
+            const preview = this.sentence ? this.sentence + " " + transcript : transcript;
+            this.lastInterim = preview;
+            this._sendToUI({ event: "transcript_interim", text: preview });
+        }
+
+        // Reset timer - user is still speaking
+        this._resetSentenceTimer();
     }
 
     _handleSTTError(err) {
         const msg = err.message || "";
-        if (msg.includes("Audio Timeout") || msg.includes("OUT_OF_RANGE") || err.code === 11) {
-            console.log("⏰ Stream timeout (normal)");
-        } else {
-            console.error("❌ STT Error:", msg);
+        const isExpectedTimeout =
+            msg.includes("Audio Timeout") ||
+            msg.includes("OUT_OF_RANGE") ||
+            msg.includes("408") ||
+            msg.includes("Request Timeout") ||
+            err.code === 11;
+
+        if (!isExpectedTimeout) {
+            console.error("❌ STT Error:", err.code, msg);
         }
 
         this.isStreaming = false;
         this.recognizeStream = null;
-    }
 
-    async _processQueue() {
-        if (this.isProcessingQueue || this.sentenceQueue.length === 0) return;
-        this.isProcessingQueue = true;
+        // Move interim to sentence BEFORE calling finalize (prevents double-use)
+        if (!this.sentence && this.lastInterim) {
+            console.log(`🔄 Using interim backup: "${this.lastInterim}"`);
+            this.sentence = this.lastInterim;
+        }
+        this.lastInterim = ""; // clear now so _finalizeSentence can't re-use it
 
-        while (this.sentenceQueue.length > 0) {
-            const text = this.sentenceQueue.shift();
-            if (!text) continue;
-
-            const start = Date.now();
-
-            try {
-                const session = this.activeSessions.get(this.roomId);
-                if (!session) continue;
-
-                const partner = this.userType === "caller"
-                    ? session.receiverConnection
-                    : session.callerConnection;
-
-                if (!partner?.myLanguage) {
-                    console.log("⚠️ Partner not connected");
-                    continue;
-                }
-
-                // 1. Translate
-                const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
-                const translateTime = Date.now() - start;
-                console.log(`🌐 [${translateTime}ms] TRANSLATE: "${text}" → "${translated}"`);
-
-                // 2. IMMEDIATELY send text to both users (don't wait for TTS!)
-                const data = {
-                    event: "translation",
-                    originalText: text,
-                    translatedText: translated,
-                    fromUser: this.userType,
-                    fromLanguage: this.myLanguage,
-                    toLanguage: partner.myLanguage
-                };
-                this._sendToUI(data);
-                partner._sendToUI(data);
-                console.log(`⚡ [${Date.now() - start}ms] Text sent to UI`);
-
-                // 3. Generate TTS in background
-                const ttsStart = Date.now();
-                const audio = await this._tts(translated, partner.myLanguage);
-                const ttsTime = Date.now() - ttsStart;
-
-                // 4. Send audio
-                if (audio && partner.ws?.readyState === 1) {
-                    // Google TTS LINEAR16 sometimes returns a WAV header already.
-                    // If it does, don't prepend another one to avoid corrupted audio starts.
-                    const isRiff = audio.length >= 4 && audio.slice(0, 4).toString() === "RIFF";
-                    const wav = isRiff ? audio : this._toWav(audio, 16000);
-                    
-                    partner.ws.send(JSON.stringify({
-                        event: "audio_playback",
-                        audio: wav.toString("base64"),
-                        format: "wav"
-                    }));
-                    console.log(`🔊 [${ttsTime}ms] TTS generated and sent. Total Pipeline: ${Date.now() - start}ms`);
-                }
-            } catch (e) {
-                console.error("Translation error:", e.message);
-            }
+        // Process any accumulated sentence (dedup handled inside _finalizeSentence)
+        if (this.sentence) {
+            this._finalizeSentence();
         }
 
-        this.isProcessingQueue = false;
+        // Continuous: immediately restart stream
+        if (this.myLanguage && this.ws?.readyState === 1) {
+            this._startStream();
+        }
+    }
+
+    _resetSentenceTimer() {
+        if (this.sentenceTimer) {
+            clearTimeout(this.sentenceTimer);
+        }
+        this.sentenceTimer = setTimeout(() => {
+            this._finalizeSentence();
+        }, this.SENTENCE_TIMEOUT);
+    }
+
+    _finalizeSentence() {
+        if (this.sentenceTimer) {
+            clearTimeout(this.sentenceTimer);
+            this.sentenceTimer = null;
+        }
+
+        // Use interim text as backup if no finals were accumulated
+        // (very common for regional/Indian languages where Google sends mostly interims)
+        if (!this.sentence && this.lastInterim) {
+            console.log(`🔄 Using interim as sentence: "${this.lastInterim}"`);
+            this.sentence = this.lastInterim;
+            this.lastInterim = "";
+        }
+
+        const finalSentence = (this.sentence || "").trim();
+        this.sentence = "";
+        this.lastInterim = "";
+
+        if (!finalSentence) return;
+
+        // Strong dedup: reject if this exact sentence was already processed recently
+        if (this._recentSentences.includes(finalSentence)) {
+            console.log(`⏩ Skipping duplicate: "${finalSentence}"`);
+            return;
+        }
+
+        console.log(`\n🔵 SENTENCE COMPLETE: "${finalSentence}"\n`);
+
+        // Track in recent history (rolling window)
+        this._recentSentences.push(finalSentence);
+        if (this._recentSentences.length > this.MAX_RECENT) {
+            this._recentSentences.shift();
+        }
+        this.lastSentence = finalSentence;
+
+        // Translate and speak (queued, never dropped)
+        this._queueTranslation(finalSentence);
+    }
+
+    _queueTranslation(text) {
+        if (!this._translationQueue) this._translationQueue = [];
+        this._translationQueue.push(text);
+        if (!this._isTranslating) {
+            this._processTranslationQueue();
+        }
+    }
+
+    async _processTranslationQueue() {
+        if (this._isTranslating) return;
+        this._isTranslating = true;
+
+        while (this._translationQueue && this._translationQueue.length > 0) {
+            const text = this._translationQueue.shift();
+            await this._translateAndSpeak(text);
+        }
+
+        this._isTranslating = false;
+    }
+
+    async _translateAndSpeak(text) {
+        if (!text) return;
+        const start = Date.now();
+
+        try {
+            const session = this.activeSessions.get(this.roomId);
+            if (!session) return;
+
+            const partner = this.userType === "caller"
+                ? session.receiverConnection
+                : session.callerConnection;
+
+            if (!partner?.myLanguage) {
+                console.log("⚠️ Partner not connected");
+                return;
+            }
+
+            // Step 1: Translate (with cache)
+            const t0 = Date.now();
+            const translated = await this._translate(text, this.myLanguage, partner.myLanguage);
+            const translateMs = Date.now() - t0;
+
+            // Send translation text to both users immediately (don't wait for TTS)
+            const data = {
+                event: "translation",
+                originalText: text,
+                translatedText: translated,
+                fromUser: this.userType,
+                fromLanguage: this.myLanguage,
+                toLanguage: partner.myLanguage
+            };
+            this._sendToUI(data);
+            partner._sendToUI(data);
+
+            // Step 2: Generate TTS (with cache)
+            const t1 = Date.now();
+            const audio = await this._tts(translated, partner.myLanguage);
+            const ttsMs = Date.now() - t1;
+
+            if (audio && partner.ws?.readyState === 1) {
+                const wav = this._toWav(audio, 48000);
+                partner.ws.send(JSON.stringify({
+                    event: "audio_playback",
+                    audio: wav.toString("base64"),
+                    format: "wav"
+                }));
+            }
+
+            const totalMs = Date.now() - start;
+            console.log(`⏱️ ${translateMs}ms+${ttsMs}ms=${totalMs}ms | "${text}" → "${translated}"`);
+        } catch (e) {
+            console.error("Translation error:", e.message);
+        }
     }
 
     async _translate(text, from, to) {
@@ -320,21 +416,26 @@ class VoiceProcessor {
         const toLang = (to || "en").split("-")[0];
         if (fromLang === toLang) return text;
 
-        try {
-            console.log(`🌐 Google Translate: "${text}" (${fromLang} → ${toLang})`);
-            const [translatedText] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
-            
-            // Save to history
-            const session = this.activeSessions.get(this.roomId);
-            if (session) {
-                if (!session.history) session.history = [];
-                session.history.push(`[${fromLang}]: ${text} -> [${toLang}]: ${translatedText}`);
-                if (session.history.length > 4) session.history.shift(); // Keep last 4 sentences
-            }
+        // Check cache first
+        const cacheKey = `${text}|${fromLang}|${toLang}`;
+        if (this.translationCache.has(cacheKey)) {
+            console.log(`💾 Translation cache hit`);
+            return this.translationCache.get(cacheKey);
+        }
 
-            return translatedText;
+        try {
+            const [result] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
+
+            // Store in cache (evict oldest if full)
+            if (this.translationCache.size >= this.MAX_TRANSLATION_CACHE) {
+                const oldest = this.translationCache.keys().next().value;
+                this.translationCache.delete(oldest);
+            }
+            this.translationCache.set(cacheKey, result);
+
+            return result;
         } catch (e) {
-            console.error("❌ Google Translate error:", e.message);
+            console.error("Translate error:", e.message);
             return text;
         }
     }
@@ -361,7 +462,7 @@ class VoiceProcessor {
             ms: { languageCode: "ms-MY", name: "ms-MY-Standard-A" },
             fil: { languageCode: "fil-PH", name: "fil-PH-Neural2-A" },
 
-            // Indian Languages
+            // Indian Languages (Neural2 for Hindi, Standard for others)
             hi: { languageCode: "hi-IN", name: "hi-IN-Neural2-A" },
             te: { languageCode: "te-IN", name: "te-IN-Standard-A" },
             ta: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
@@ -398,34 +499,68 @@ class VoiceProcessor {
         const base = (lang || "en").split("-")[0];
         const voice = voices[base] || { languageCode: lang, ssmlGender: "NEUTRAL" };
 
+        // Check TTS cache first
+        const ttsCacheKey = `${text}|${base}`;
+        if (this.ttsCache.has(ttsCacheKey)) {
+            console.log(`💾 TTS cache hit`);
+            return this.ttsCache.get(ttsCacheKey);
+        }
+
         try {
             const [response] = await this.ttsClient.synthesizeSpeech({
                 input: { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 16000, speakingRate: 1.1 }
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
             });
+
+            // Store in cache (evict oldest if full)
+            if (this.ttsCache.size >= this.MAX_TTS_CACHE) {
+                const oldest = this.ttsCache.keys().next().value;
+                this.ttsCache.delete(oldest);
+            }
+            this.ttsCache.set(ttsCacheKey, response.audioContent);
+
             return response.audioContent;
         } catch (e) {
             console.error("TTS error:", e.message);
-            return null;
+            // Fallback: retry with just languageCode + NEUTRAL gender (no specific voice name)
+            try {
+                console.log(`🔄 TTS fallback for ${base}...`);
+                const [fallback] = await this.ttsClient.synthesizeSpeech({
+                    input: { text },
+                    voice: { languageCode: voice.languageCode || lang, ssmlGender: "NEUTRAL" },
+                    audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.15 }
+                });
+                return fallback.audioContent;
+            } catch (e2) {
+                console.error("TTS fallback error:", e2.message);
+                return null;
+            }
         }
     }
 
     _getLangCode(lang) {
         const map = {
-            // English
-            en: "en-US",
-            // ✅ All Indian languages (previously missing: bn, gu, kn, ml, mr, pa, ur)
-            hi: "hi-IN", te: "te-IN", ta: "ta-IN",
-            bn: "bn-IN", gu: "gu-IN", kn: "kn-IN",
-            ml: "ml-IN", mr: "mr-IN", pa: "pa-IN", ur: "ur-IN",
-            // European
-            es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
-            it: "it-IT", nl: "nl-NL", pl: "pl-PL", ru: "ru-RU",
-            // Asian
-            zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR",
+            // Major World Languages
+            en: "en-US", es: "es-ES", fr: "fr-FR", de: "de-DE", pt: "pt-BR",
+            it: "it-IT", ru: "ru-RU", nl: "nl-NL", pl: "pl-PL",
+
+            // Asian Languages
+            zh: "cmn-CN", ja: "ja-JP", ko: "ko-KR", vi: "vi-VN",
+            th: "th-TH", id: "id-ID", ms: "ms-MY", fil: "fil-PH",
+
+            // Indian Languages (ALL)
+            hi: "hi-IN", te: "te-IN", ta: "ta-IN", bn: "bn-IN",
+            gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", mr: "mr-IN",
+            pa: "pa-IN", ur: "ur-IN",
+
             // Middle Eastern
-            ar: "ar-XA", tr: "tr-TR", he: "he-IL"
+            ar: "ar-XA", he: "he-IL", tr: "tr-TR", fa: "fa-IR",
+
+            // European
+            sv: "sv-SE", da: "da-DK", no: "nb-NO", fi: "fi-FI",
+            el: "el-GR", cs: "cs-CZ", ro: "ro-RO", hu: "hu-HU",
+            uk: "uk-UA", af: "af-ZA"
         };
         return map[(lang || "en").split("-")[0]] || "en-US";
     }
@@ -466,6 +601,22 @@ class VoiceProcessor {
     }
 
     async cleanup() {
+        if (this.sentenceTimer) {
+            clearTimeout(this.sentenceTimer);
+            this.sentenceTimer = null;
+        }
+
+        // Clear idle timer
+        if (this._idleTimer) {
+            clearTimeout(this._idleTimer);
+            this._idleTimer = null;
+        }
+
+        // Process any remaining sentence
+        if (this.sentence && this.sentence !== this.lastSentence) {
+            this._finalizeSentence();
+        }
+
         await this._stopStream();
 
         const session = this.activeSessions.get(this.roomId);
