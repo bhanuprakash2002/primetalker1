@@ -19,7 +19,7 @@ const sharedTranslateClient = new Translate(clientConfig);
 
 // Initialize Gemini API
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 // Indian language codes for faster timeout
 const INDIAN_LANGS = ['te', 'hi', 'ta', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ur'];
