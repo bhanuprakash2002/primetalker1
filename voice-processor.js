@@ -17,9 +17,7 @@ const sharedSpeechClient = new speech.SpeechClient(clientConfig);
 const sharedTtsClient = new textToSpeech.TextToSpeechClient(clientConfig);
 const sharedTranslateClient = new Translate(clientConfig);
 
-// Initialize Gemini API
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+// Removed Gemini API to use faster Google Translate API directly
 
 // Indian language codes for faster timeout
 const INDIAN_LANGS = ['te', 'hi', 'ta', 'bn', 'gu', 'kn', 'ml', 'mr', 'pa', 'ur'];
@@ -78,7 +76,6 @@ class VoiceProcessor {
                     try {
                         const warmStart = Date.now();
                         await Promise.all([
-                            geminiModel.generateContent("hello").catch(() => {}),
                             this.ttsClient.synthesizeSpeech({
                                 input: { text: "." },
                                 voice: { languageCode: "en-US" },
@@ -324,55 +321,21 @@ class VoiceProcessor {
         if (fromLang === toLang) return text;
 
         try {
-            // Get conversation history
-            let historyText = "";
+            console.log(`🌐 Google Translate: "${text}" (${fromLang} → ${toLang})`);
+            const [translatedText] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
+            
+            // Save to history
             const session = this.activeSessions.get(this.roomId);
             if (session) {
                 if (!session.history) session.history = [];
-                historyText = session.history.join("\\n");
-            }
-
-            const prompt = `You are an expert AI translator.
-Source Language: '${fromLang}'
-Target Language: '${toLang}'
-
-Recent Conversation Context (for reference):
-${historyText || "(Start of conversation)"}
-
-New Input to Translate: "${text}"
-
-Instructions:
-1. Use the context to perfectly understand the meaning and clarify any ambiguous words.
-2. Fix any STT grammar errors.
-3. ONLY output the final translated text in the Target Language. No quotes or extra text.`;
-            
-            console.log(`🤖 Gemini translate: "${text}" (${fromLang} → ${toLang})`);
-            const result = await geminiModel.generateContent({
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.1 }
-            });
-            const response = await result.response;
-            const translatedText = response.text().trim();
-
-            // Save to history
-            if (session) {
                 session.history.push(`[${fromLang}]: ${text} -> [${toLang}]: ${translatedText}`);
                 if (session.history.length > 4) session.history.shift(); // Keep last 4 sentences
             }
 
             return translatedText;
         } catch (e) {
-            console.error("❌ Gemini Translate error:", e.message);
-            // Fallback to Google Translate API if Gemini fails
-            console.log("🔄 Falling back to Google Translate API...");
-            try {
-                const [fallbackTranslation] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
-                console.log(`✅ Fallback translation: "${fallbackTranslation}"`);
-                return fallbackTranslation;
-            } catch (fallbackErr) {
-                console.error("❌ Google Translate fallback also failed:", fallbackErr.message);
-                return text;
-            }
+            console.error("❌ Google Translate error:", e.message);
+            return text;
         }
     }
 
