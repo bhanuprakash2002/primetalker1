@@ -165,7 +165,7 @@ class VoiceProcessor {
                         model: "latest_long"
                     },
                     interimResults: true,
-                    singleUtterance: true
+                    singleUtterance: false
                 })
                 .on("data", this._handleSTTData)
                 .on("error", this._handleSTTError)
@@ -220,23 +220,38 @@ class VoiceProcessor {
         if (!response.results?.[0]) return;
 
         const result = response.results[0];
-        const transcript = result.alternatives?.[0]?.transcript?.trim();
-        if (!transcript) return;
+        const rawTranscript = result.alternatives?.[0]?.transcript?.trim();
+        if (!rawTranscript) return;
 
         const isFinal = result.isFinal;
 
-        if (isFinal) {
-            this.lastInterim = "";
-            console.log(`📝 Final: "${transcript}"`);
-            
-            // Because singleUtterance: true, transcript is exactly the completed sentence.
-            // No accumulation needed.
-            this.sentence = transcript;
-            this._finalizeSentence();
-        } else {
-            this.lastInterim = transcript;
-            this._sendToUI({ event: "transcript_interim", text: transcript });
+        // Strip already-processed sentence prefix from cumulative STT results.
+        // Google STT returns growing cumulative text within one session:
+        //   "Hello" → "Hello how are you" → "Hello how are you I am fine"
+        // After sentence 1 ("Hello how are you") is finalized, sentence 2's STT
+        // result still contains sentence 1 as a prefix. Strip it so only NEW
+        // words are accumulated.
+        let transcript = rawTranscript;
+        if (this.lastSentence && transcript.startsWith(this.lastSentence)) {
+            transcript = transcript.slice(this.lastSentence.length).trim();
         }
+
+        if (!transcript) return; // nothing new to add
+
+        if (isFinal) {
+            // Accumulate final results into the sentence
+            this.sentence = this.sentence ? this.sentence + " " + transcript : transcript;
+            this.lastInterim = ""; // Clear interim since we got final
+            console.log(`📝 Final: "${this.sentence}"`);
+        } else {
+            // Save interim as backup (critical for regional languages)
+            const preview = this.sentence ? this.sentence + " " + transcript : transcript;
+            this.lastInterim = preview;
+            this._sendToUI({ event: "transcript_interim", text: preview });
+        }
+
+        // Reset timer - user is still speaking
+        this._resetSentenceTimer();
     }
 
     _handleSTTError(err) {
@@ -319,6 +334,11 @@ class VoiceProcessor {
 
         // Translate and speak (queued, never dropped)
         this._queueTranslation(finalSentence);
+
+        // Cleanly reset Google STT context to prevent word repetition
+        if (this.isStreaming) {
+            this._restartStream();
+        }
     }
 
     _queueTranslation(text) {
