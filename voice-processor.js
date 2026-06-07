@@ -164,7 +164,7 @@ class VoiceProcessor {
                         useEnhanced: true
                     },
                     interimResults: true,
-                    singleUtterance: false
+                    singleUtterance: true
                 })
                 .on("data", this._handleSTTData)
                 .on("error", this._handleSTTError)
