@@ -82,7 +82,7 @@ class VoiceProcessor {
                             this.ttsClient.synthesizeSpeech({
                                 input: { text: "." },
                                 voice: { languageCode: "en-US" },
-                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000 }
+                                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 16000 }
                             })
                         ]);
                         console.log(`🔥 Translate + TTS warmed up in ${Date.now() - warmStart}ms`);
@@ -160,7 +160,7 @@ class VoiceProcessor {
                 .streamingRecognize({
                     config: {
                         encoding: "LINEAR16",
-                        sampleRateHertz: 48000,
+                        sampleRateHertz: 16000,
                         languageCode: langCode,
                         enableAutomaticPunctuation: true,
                         model: "latest_long",
@@ -346,6 +346,7 @@ Instructions:
 2. Fix any STT grammar errors.
 3. ONLY output the final translated text in the Target Language. No quotes or extra text.`;
             
+            console.log(`🤖 Gemini translate: "${text}" (${fromLang} → ${toLang})`);
             const result = await geminiModel.generateContent({
                 contents: [{ role: "user", parts: [{ text: prompt }] }],
                 generationConfig: { temperature: 0.1 }
@@ -361,8 +362,17 @@ Instructions:
 
             return translatedText;
         } catch (e) {
-            console.error("Gemini Translate error:", e.message);
-            return text;
+            console.error("❌ Gemini Translate error:", e.message);
+            // Fallback to Google Translate API if Gemini fails
+            console.log("🔄 Falling back to Google Translate API...");
+            try {
+                const [fallbackTranslation] = await this.translateClient.translate(text, { from: fromLang, to: toLang });
+                console.log(`✅ Fallback translation: "${fallbackTranslation}"`);
+                return fallbackTranslation;
+            } catch (fallbackErr) {
+                console.error("❌ Google Translate fallback also failed:", fallbackErr.message);
+                return text;
+            }
         }
     }
 
@@ -429,7 +439,7 @@ Instructions:
             const [response] = await this.ttsClient.synthesizeSpeech({
                 input: { text },
                 voice,
-                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 48000, speakingRate: 1.1 }
+                audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 16000, speakingRate: 1.1 }
             });
             return response.audioContent;
         } catch (e) {
